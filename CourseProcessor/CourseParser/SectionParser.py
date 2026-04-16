@@ -7,7 +7,7 @@ from .LessonParser import LessonAnalyzer
 class SectionAnalyzer:
     def __init__(self, section_dir: str, knowledge_base_dir: str, course_id: str):
         self.section_dir = section_dir
-        self.knowledge_base_dir = knowledge_base_dir 
+        self.knowledge_base_dir = knowledge_base_dir
         self.course_id = course_id
 
     def iter_lesson_dirs(self) -> Iterator[str]:
@@ -29,6 +29,7 @@ class SectionAnalyzer:
                 pass
 
         for lesson_dir in self.iter_lesson_dirs():
+            # BUG FIX: передаём course_id (3-й аргумент) в LessonAnalyzer
             lp = LessonAnalyzer(lesson_dir, self.knowledge_base_dir, self.course_id)
             parsed = lp.parse()
             all_steps.extend(parsed)
@@ -40,4 +41,3 @@ class SectionAnalyzer:
                     sf.write(json.dumps(rec_copy, ensure_ascii=False) + "\n")
 
         return all_steps
-    

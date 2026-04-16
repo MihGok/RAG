@@ -1,13 +1,13 @@
 import os
-import requests
-import json
 import re
+import json
 import time
 import random
 from urllib.parse import urlencode
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional, Callable, TypeVar
 from requests.auth import HTTPBasicAuth
+import requests
 from config import AppConfig
 
 MAX_RETRIES = 5
@@ -91,7 +91,6 @@ class StepikCourseLoader:
         if not self.client_id or not self.client_secret:
             raise ValueError("Не найдены STEPIK_CLIENT_ID или STEPIK_CLIENT_SECRET в .env")
 
-        # Без proxy
         self.session = requests.Session()
 
         USER_AGENT = (
@@ -113,8 +112,11 @@ class StepikCourseLoader:
             self.session.headers.update({"Authorization": f"Bearer {self.token}"})
         self._last_raw_response: Optional[Dict[str, Any]] = None
 
+    # ─────────────────────────────────────────────
+    # AUTH
+    # ─────────────────────────────────────────────
+
     def _login_flow(self) -> Optional[str]:
-        """Логин через OAuth без proxy."""
         if os.path.exists("token_storage.json"):
             try:
                 with open("token_storage.json", "r", encoding="utf-8") as f:
@@ -128,11 +130,9 @@ class StepikCourseLoader:
                     os.remove("token_storage.json")
                 except Exception:
                     pass
-
         return self._authorize_user_manual()
 
     def _save_tokens(self, tokens: Dict[str, Any]):
-        """Сохраняет токены в файл."""
         with open("token_storage.json", "w", encoding="utf-8") as f:
             json.dump(tokens, f, ensure_ascii=False, indent=2)
         print("[AUTH] Токены сохранены в token_storage.json")
@@ -140,18 +140,13 @@ class StepikCourseLoader:
             print(f"[AUTH] Полученные scopes: {tokens['scope']}")
 
     def _exchange_code_for_token(self, code: str) -> Optional[str]:
-        """Обмен кода на токен."""
         auth = HTTPBasicAuth(self.client_id, self.client_secret)
 
         @make_request_with_retry
         def execute():
             return self.session.post(
                 self.OAUTH_URL,
-                data={
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": self.REDIRECT_URI,
-                },
+                data={"grant_type": "authorization_code", "code": code, "redirect_uri": self.REDIRECT_URI},
                 auth=auth,
                 timeout=15,
             )
@@ -170,7 +165,6 @@ class StepikCourseLoader:
         return access
 
     def _authorize_user_manual(self) -> Optional[str]:
-        """Ручная авторизация через браузер."""
         params = {
             "response_type": "code",
             "client_id": self.client_id,
@@ -178,35 +172,23 @@ class StepikCourseLoader:
             "scope": "read write",
         }
         auth_link = f"{self.AUTH_URL}?{urlencode(params)}"
-
         print("\n" + "=" * 80)
-        print("ВАЖНО! ПЕРЕД АВТОРИЗАЦИЕЙ:")
-        print('1. Убедитесь, что ваше приложение на https://stepik.org/oauth2/applications/')
-        print('   настроено с типом "Confidential" и grant type "authorization-code"')
-        print("2. REDIRECT_URI должен быть точно: http://localhost:5000/callback")
-        print("=" * 80)
-        print("\nОТКРОЙТЕ ССЫЛКУ В БРАУЗЕРЕ ДЛЯ АВТОРИЗАЦИИ:")
+        print("ОТКРОЙТЕ ССЫЛКУ В БРАУЗЕРЕ ДЛЯ АВТОРИЗАЦИИ:")
         print(auth_link)
-        print("\nПосле авторизации /callback в URL будет параметр ?code=... — вставьте его сюда.")
         print("=" * 80 + "\n")
-
         code = input("Вставьте code из URL: ").strip()
         if not code:
             raise ConnectionError("Код авторизации не введён")
         return self._exchange_code_for_token(code)
 
     def _refresh_access_token(self, refresh_token: str) -> Optional[str]:
-        """Обновление токена."""
         auth = HTTPBasicAuth(self.client_id, self.client_secret)
 
         @make_request_with_retry
         def execute():
             return self.session.post(
                 self.OAUTH_URL,
-                data={
-                    "grant_type": "refresh_token",
-                    "refresh_token": refresh_token,
-                },
+                data={"grant_type": "refresh_token", "refresh_token": refresh_token},
                 auth=auth,
                 timeout=15,
             )
@@ -231,8 +213,11 @@ class StepikCourseLoader:
             self.session.headers.update({"Authorization": f"Bearer {access}"})
         return access
 
+    # ─────────────────────────────────────────────
+    # HTTP HELPERS
+    # ─────────────────────────────────────────────
+
     def _get_headers(self) -> Dict[str, str]:
-        """Возвращает заголовки для запросов."""
         auth_header = self.session.headers.get("Authorization")
         return {
             "Authorization": auth_header if auth_header else f"Bearer {self.token}",
@@ -242,12 +227,15 @@ class StepikCourseLoader:
 
     @make_request_with_retry
     def _fetch_single_raw(self, url: str, headers: Dict[str, str], params: Any = None) -> Optional[requests.Response]:
-        """Базовый метод для GET запросов."""
         try:
             return self.session.get(url, headers=headers, params=params, timeout=20)
         except Exception as e:
             print(f"[HTTP GET ERROR] {type(e).__name__}: {e}")
             return None
+
+    # ─────────────────────────────────────────────
+    # SEARCH
+    # ─────────────────────────────────────────────
 
     def get_course_ids_by_query(self, query: str, language: str = "ru", limit: int = 50) -> List[int]:
         print(f"[SEARCH] Ищу курсы по запросу '{query}' (lang={language}, limit={limit})...")
@@ -264,9 +252,7 @@ class StepikCourseLoader:
                 "type": "course",
                 "page": page,
             }
-
             response = self._fetch_single_raw(url=url, headers=self._get_headers(), params=params)
-
             if not response or response.status_code != 200:
                 print(f"[SEARCH] Ошибка запроса на странице {page}")
                 break
@@ -276,7 +262,6 @@ class StepikCourseLoader:
             meta = data.get("meta", {})
 
             if not results:
-                print("[SEARCH] Результаты закончились.")
                 break
 
             for r in results:
@@ -284,7 +269,7 @@ class StepikCourseLoader:
                 if cid and cid not in course_ids:
                     course_ids.append(cid)
 
-            print(f"  -> Страница {page}: найдено {len(results)}, всего собрано {len(course_ids)}")
+            print(f"  -> Страница {page}: найдено {len(results)}, всего {len(course_ids)}")
 
             if not meta.get("has_next"):
                 break
@@ -294,51 +279,9 @@ class StepikCourseLoader:
 
         return course_ids[:limit]
 
-    def _sanitize_filename(self, name: Any) -> str:
-        name = str(name or "").strip()
-        name = re.sub(r'[<>:"/\\|?*]', "", name)
-        name = name.strip().rstrip(".")
-        if not name:
-            return "Unnamed"
-        return name
-
-    def get_course_outline(self, course: Dict[str, Any]) -> List[Dict[str, Any]]:
-        cid = course.get("id")
-        print(f"[INFO] Сбор структуры курса {cid} для анализа...")
-
-        section_ids = course.get("sections") or []
-        if not section_ids:
-            return []
-
-        sections = self.fetch_objects("sections", section_ids)
-        sections.sort(key=lambda x: x.get("position", 0))
-
-        all_lessons_metadata = []
-
-        for section in sections:
-            unit_ids = section.get("units") or []
-            if not unit_ids:
-                continue
-
-            units = self.fetch_objects("units", unit_ids)
-            units.sort(key=lambda x: x.get("position", 0))
-
-            lesson_ids = [u.get("lesson") for u in units if u.get("lesson")]
-            lessons = self.fetch_objects("lessons", lesson_ids)
-            lessons_map = {l["id"]: l for l in lessons if l.get("id") is not None}
-
-            for unit in units:
-                lid = unit.get("lesson")
-                lesson = lessons_map.get(lid)
-                if lesson:
-                    all_lessons_metadata.append({
-                        "lesson_id": lesson["id"],
-                        "title": lesson.get("title"),
-                        "section_title": section.get("title"),
-                    })
-
-        print(f"[INFO] Найдено уроков: {len(all_lessons_metadata)}")
-        return all_lessons_metadata
+    # ─────────────────────────────────────────────
+    # FETCH
+    # ─────────────────────────────────────────────
 
     def fetch_object_single(self, object_type: str, object_id: int) -> Dict[str, Any]:
         url = f"{self.API_URL}/{object_type}/{object_id}"
@@ -382,26 +325,19 @@ class StepikCourseLoader:
 
         return objects
 
+    # ─────────────────────────────────────────────
+    # ENROLLMENT
+    # ─────────────────────────────────────────────
+
     def enroll_in_course(self, course_id: int) -> bool:
-        """Записаться на курс через API."""
         url = f"{self.API_URL}/enrollments"
-        payload = {
-            "enrollment": {
-                "course": str(course_id),
-            }
-        }
+        payload = {"enrollment": {"course": str(course_id)}}
 
         @make_request_with_retry
         def execute():
-            return self.session.post(
-                url,
-                headers=self._get_headers(),
-                json=payload,
-                timeout=15,
-            )
+            return self.session.post(url, headers=self._get_headers(), json=payload, timeout=15)
 
         response = execute()
-
         if response and response.status_code in (200, 201):
             print(f"[SUCCESS] Зачислен на курс {course_id}")
             return True
@@ -412,72 +348,74 @@ class StepikCourseLoader:
                 return True
             print(f"[ERROR] Ошибка 400 при записи на курс {course_id}: {error_text[:300]}")
             return False
-        elif response and response.status_code == 401:
-            print(f"[ERROR] 401 Unauthorized при записи на курс {course_id}")
-            return False
         else:
             print(f"[ERROR] Не удалось записаться на курс {course_id}")
             if response:
                 print(f"  Статус: {response.status_code}")
-                print(f"  Ответ: {response.text[:500]}")
             return False
 
     def check_enrollment(self, course_id: int) -> bool:
-        """Проверить, записан ли пользователь на курс."""
         url = f"{self.API_URL}/enrollments"
         params = {"course": course_id}
-
         response = self._fetch_single_raw(url=url, headers=self._get_headers(), params=params)
         if not response or response.status_code != 200:
             return False
-
         data = response.json()
-        enrollments = data.get("enrollments", [])
-        return len(enrollments) > 0
+        return len(data.get("enrollments", [])) > 0
 
-    def search_public_free_courses(self, query: str, limit: int = 1) -> List[Dict[str, Any]]:
-        print(f"Поиск курсов по запросу: {query} ...")
-        url = f"{self.API_URL}/search-results"
-        found: List[Dict[str, Any]] = []
-        page = 1
+    # ─────────────────────────────────────────────
+    # OUTLINE (for analysis)
+    # ─────────────────────────────────────────────
 
-        while len(found) < limit:
-            params = {
-                "query": query,
-                "is_public": "true",
-                "is_paid": "false",
-                "type": "course",
-                "page": page,
-            }
-            response = self._fetch_single_raw(url=url, headers=self._get_headers(), params=params)
-            if not response or response.status_code != 200:
-                break
+    def get_course_outline(self, course: Dict[str, Any]) -> List[Dict[str, Any]]:
+        cid = course.get("id")
+        print(f"[INFO] Сбор структуры курса {cid}...")
 
-            results = response.json().get("search-results", [])
-            if not results:
-                break
+        section_ids = course.get("sections") or []
+        if not section_ids:
+            return []
 
-            course_ids = []
-            for r in results:
-                cid = r.get("target_id") or r.get("target") or r.get("course")
-                if cid:
-                    course_ids.append(cid)
-                    if len(course_ids) >= (limit - len(found)):
-                        break
+        sections = self.fetch_objects("sections", section_ids)
+        sections.sort(key=lambda x: x.get("position", 0))
 
-            if not course_ids:
-                break
+        all_lessons_metadata = []
 
-            courses = self.fetch_objects("courses", course_ids)
-            for c in courses:
-                if c.get("is_public") and not c.get("is_paid"):
-                    found.append(c)
-                    if len(found) >= limit:
-                        break
+        for section in sections:
+            unit_ids = section.get("units") or []
+            if not unit_ids:
+                continue
 
-            page += 1
+            units = self.fetch_objects("units", unit_ids)
+            units.sort(key=lambda x: x.get("position", 0))
 
-        return found[:limit]
+            lesson_ids = [u.get("lesson") for u in units if u.get("lesson")]
+            lessons = self.fetch_objects("lessons", lesson_ids)
+            lessons_map = {l["id"]: l for l in lessons if l.get("id") is not None}
+
+            for unit in units:
+                lid = unit.get("lesson")
+                lesson = lessons_map.get(lid)
+                if lesson:
+                    all_lessons_metadata.append({
+                        "lesson_id": lesson["id"],
+                        "title": lesson.get("title"),
+                        "section_title": section.get("title"),
+                    })
+
+        print(f"[INFO] Найдено уроков: {len(all_lessons_metadata)}")
+        return all_lessons_metadata
+
+    # ─────────────────────────────────────────────
+    # UTILITIES
+    # ─────────────────────────────────────────────
+
+    def _sanitize_filename(self, name: Any) -> str:
+        name = str(name or "").strip()
+        name = re.sub(r'[<>:"/\\|?*]', "", name)
+        name = name.strip().rstrip(".")
+        if not name:
+            return "Unnamed"
+        return name[:120]
 
     def save_json(self, data: Any, folder: str, filename: str):
         os.makedirs(folder, exist_ok=True)
@@ -488,20 +426,228 @@ class StepikCourseLoader:
         except Exception as e:
             print(f"Ошибка сохранения {path}: {e}")
 
-    def process_course(self, course: Dict[str, Any], allowed_lesson_ids: Optional[List[int]] = None):
+    # ─────────────────────────────────────────────
+    # NEW: SESSION-BASED DOWNLOAD
+    # ─────────────────────────────────────────────
+
+    def process_course_to_session(self, course: Dict[str, Any], raw_data_dir: str):
         """
-        Логика сохранения файлов не меняется:
-        - course_<id>.json в корень
-        - Section_* папки
-        - Lesson_* папки
-        - step_*.json
+        Скачивает все уроки курса и сохраняет в {raw_data_dir}/{lesson_name}.json.
+        Каждый файл содержит: lesson_name, lesson_id, course_title,
+        text (из текстовых шагов), transcript (из видео-шагов).
         """
         cid = course.get("id")
+        course_title = course.get("title", f"course_{cid}")
 
-        is_enrolled = course.get("is_enrolled", False)
-        if not is_enrolled:
+        # Запись на курс если нужно
+        if not course.get("is_enrolled"):
             if not self.check_enrollment(cid):
-                print(f"[INFO] Не записаны на курс {cid}. Попытка записи...")
+                print(f"[INFO] Записываемся на курс {cid}...")
+                self.enroll_in_course(cid)
+                time.sleep(1)
+
+        os.makedirs(raw_data_dir, exist_ok=True)
+
+        section_ids = course.get("sections") or []
+        sections = self.fetch_objects("sections", section_ids)
+        sections.sort(key=lambda x: x.get("position", 0))
+
+        for section in sections:
+            unit_ids = section.get("units") or []
+            if not unit_ids:
+                continue
+
+            units = self.fetch_objects("units", unit_ids)
+            units.sort(key=lambda x: x.get("position", 0))
+
+            lesson_ids = [u.get("lesson") for u in units if u.get("lesson")]
+            lessons = self.fetch_objects("lessons", lesson_ids)
+            lessons_map = {l.get("id"): l for l in lessons if l.get("id") is not None}
+
+            for unit in units:
+                lid = unit.get("lesson")
+                lesson = lessons_map.get(lid)
+                if lesson:
+                    self._process_lesson_to_raw(lesson, unit, course_title, cid, raw_data_dir)
+
+    def _process_lesson_to_raw(
+        self,
+        lesson: Dict[str, Any],
+        unit: Dict[str, Any],
+        course_title: str,
+        course_id: int,
+        raw_data_dir: str,
+    ):
+        """Обрабатывает один урок: собирает текст + транскрипции → сохраняет в raw_data."""
+        lesson_id = lesson.get("id")
+        lesson_title = lesson.get("title", f"lesson_{lesson_id}")
+        pos = unit.get("position", 0)
+
+        # Получаем шаги
+        step_ids = lesson.get("steps") or []
+        if not step_ids:
+            full = self.fetch_object_single("lessons", lesson_id)
+            if full:
+                step_ids = full.get("steps") or []
+                lesson = full
+
+        if not step_ids:
+            print(f"   [SKIP] {lesson_title}: нет шагов")
+            return
+
+        steps = self.fetch_objects("steps", step_ids)
+        steps.sort(key=lambda x: x.get("position", 0))
+
+        text_parts = []
+        videos_to_transcribe = []
+
+        for step in steps:
+            block = step.get("block") or {}
+            if isinstance(block, list):
+                block = block[0] if block else {}
+
+            block_name = (block.get("name") or "").strip().lower()
+
+            if block_name in ("text", "html", "markdown"):
+                raw_text = block.get("text") or ""
+                cleaned = self._clean_html(raw_text)
+                if cleaned:
+                    text_parts.append(cleaned)
+
+            elif block_name == "video":
+                video_obj = block.get("video") or block
+                urls = video_obj.get("urls") if isinstance(video_obj, dict) else None
+                if urls:
+                    video_url = self._pick_video_url(urls)
+                    if video_url:
+                        videos_to_transcribe.append({
+                            "step_id": step.get("id"),
+                            "video_url": video_url,
+                        })
+
+        # Транскрибируем видео
+        transcripts = []
+        if videos_to_transcribe:
+            try:
+                from CourseProcessor.client import Client
+                results = Client.transcribe_batch(videos_to_transcribe)
+                for sid, result in results.items():
+                    t = result.get("text", "")
+                    if t:
+                        transcripts.append(t)
+            except Exception as e:
+                print(f"   [Transcribe Error] {lesson_title}: {e}")
+
+        combined_text = "\n\n".join(text_parts)
+        combined_transcript = "\n\n".join(transcripts)
+
+        if not combined_text and not combined_transcript:
+            print(f"   [SKIP] {lesson_title}: нет текстового контента")
+            return
+
+        output = {
+            "lesson_name": lesson_title,
+            "lesson_id": lesson_id,
+            "position": pos,
+            "course_title": course_title,
+            "course_id": course_id,
+            "text": combined_text,
+            "transcript": combined_transcript,
+        }
+
+        # Генерируем имя файла
+        safe_name = self._sanitize_filename(lesson_title)
+        filepath = os.path.join(raw_data_dir, f"{safe_name}.json")
+        if os.path.exists(filepath):
+            filepath = os.path.join(raw_data_dir, f"{safe_name}_{lesson_id}.json")
+
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(output, f, ensure_ascii=False, indent=2)
+            print(
+                f"   ✅ {os.path.basename(filepath)} "
+                f"(текст: {len(combined_text)} с., транскрипция: {len(combined_transcript)} с.)"
+            )
+        except Exception as e:
+            print(f"   [Save Error] {lesson_title}: {e}")
+
+    # ─────────────────────────────────────────────
+    # TEXT UTILITIES (copied from StepParser)
+    # ─────────────────────────────────────────────
+
+    @staticmethod
+    def _clean_html(text: Optional[str]) -> str:
+        import html as html_lib
+        from bs4 import BeautifulSoup
+
+        if not text:
+            return ""
+
+        text = html_lib.unescape(text)
+        soup = BeautifulSoup(text, "html.parser")
+
+        code_blocks = []
+        for code in soup.find_all(["code", "pre"]):
+            code_blocks.append(f"\n```\n{code.get_text()}\n```\n")
+            code.replace_with(f"__CODE_BLOCK_{len(code_blocks)-1}__")
+
+        text = soup.get_text(separator="\n")
+        text = text.replace("\xa0", " ")
+        text = re.sub(r"[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]", " ", text)
+        text = re.sub(r"<[^>]+>", "", text)
+        text = re.sub(r"&[a-zA-Z]+;", "", text)
+        text = re.sub(r"&#\d+;", "", text)
+        text = re.sub(r"[^\w\s.,!?;:()\-\"\"\'\'«»—–\n]", "", text, flags=re.UNICODE)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n\s*\n+", "\n\n", text)
+        lines = [line.strip() for line in text.split("\n")]
+        text = "\n".join(lines)
+
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"__CODE_BLOCK_{i}__", block)
+
+        return text.strip()
+
+    @staticmethod
+    def _pick_video_url(urls: List[Dict[str, Any]]) -> Optional[str]:
+        if not urls:
+            return None
+        numeric_pairs = []
+        fallback = []
+        for e in urls:
+            q = e.get("quality")
+            u = e.get("url") or e.get("src") or e.get("link")
+            if not u:
+                continue
+            if isinstance(q, str):
+                m = re.search(r"(\d+)", q)
+                if m:
+                    try:
+                        numeric_pairs.append((int(m.group(1)), u))
+                        continue
+                    except Exception:
+                        pass
+            fallback.append(u)
+
+        if numeric_pairs:
+            numeric_pairs.sort(key=lambda x: x[0])
+            for qv, u in numeric_pairs:
+                if qv == 360:
+                    return u
+            return numeric_pairs[0][1]
+        return fallback[-1] if fallback else None
+
+    # ─────────────────────────────────────────────
+    # LEGACY: old file-based download (kept for CourseParser compat)
+    # ─────────────────────────────────────────────
+
+    def process_course(self, course: Dict[str, Any], allowed_lesson_ids: Optional[List[int]] = None):
+        """Старый метод: сохраняет курс в иерархию папок Section_/Lesson_/step_*.json."""
+        cid = course.get("id")
+
+        if not course.get("is_enrolled"):
+            if not self.check_enrollment(cid):
+                print(f"[INFO] Записываемся на курс {cid}...")
                 self.enroll_in_course(cid)
                 time.sleep(1)
 
@@ -514,11 +660,15 @@ class StepikCourseLoader:
         for s in sections:
             self.process_section(s, ".", allowed_lesson_ids)
 
-    def process_section(self, section: Dict[str, Any], parent_dir: str):
+    def process_section(
+        self,
+        section: Dict[str, Any],
+        parent_dir: str,
+        allowed_lesson_ids: Optional[List[int]] = None,  # BUG FIX: was missing
+    ):
         sid = section.get("id")
         pos = section.get("position", 0)
         title = self._sanitize_filename(section.get("title", f"Section_{sid}"))
-
         section_dir = os.path.join(parent_dir, f"Section_{pos:02d}_{title}")
 
         unit_ids = section.get("units") or []
@@ -528,26 +678,21 @@ class StepikCourseLoader:
         units = self.fetch_objects("units", unit_ids)
         units.sort(key=lambda x: x.get("position", 0))
 
-        units_to_process = []
-        # if allowed_lesson_ids is not None:
-        #     allowed_set = set(allowed_lesson_ids)
-        #     for u in units:
-        #         if u.get("lesson") in allowed_set:
-        #             units_to_process.append(u)
-        # else:
-        #     units_to_process = units
-        units_to_process = units
-        if not units_to_process:
+        if allowed_lesson_ids is not None:
+            allowed_set = set(allowed_lesson_ids)
+            units = [u for u in units if u.get("lesson") in allowed_set]
+
+        if not units:
             return
 
         os.makedirs(section_dir, exist_ok=True)
         self.save_json(section, section_dir, f"section_{sid}.json")
 
-        lesson_ids = [u.get("lesson") for u in units_to_process if u.get("lesson")]
+        lesson_ids = [u.get("lesson") for u in units if u.get("lesson")]
         lessons = self.fetch_objects("lessons", lesson_ids)
         lessons_map = {l.get("id"): l for l in lessons if l.get("id") is not None}
 
-        for unit in units_to_process:
+        for unit in units:
             lid = unit.get("lesson")
             lesson = lessons_map.get(lid)
             if lesson:
@@ -566,19 +711,14 @@ class StepikCourseLoader:
 
         step_ids = lesson.get("steps") or []
         if not step_ids:
-            print(f"    [INFO] Урок {lesson_id} не содержит steps в bulk. Пытаюсь одиночный запрос...")
+            print(f"    [INFO] Урок {lesson_id}: пробуем одиночный запрос...")
             full = self.fetch_object_single("lessons", lesson_id)
-
             if getattr(self, "_last_raw_response", None):
                 self.save_json(self._last_raw_response, lesson_dir, f"lesson_raw_{lesson_id}.json")
                 self._last_raw_response = None
-
             if full and full.get("steps"):
                 lesson = full
                 step_ids = lesson.get("steps")
-                print(f"    Fallback успешен: найдено {len(step_ids)} шагов.")
-            else:
-                print("    [WARN] Шаги не найдены даже после одиночного запроса.")
 
         print(f"    -> Урок {pos}: {title} (Шагов: {len(step_ids)})")
         if not step_ids:
@@ -592,13 +732,11 @@ class StepikCourseLoader:
     def save_step(self, step: Dict[str, Any], parent_dir: str):
         sid = step.get("id")
         pos = step.get("position", 0)
-
         block_obj = step.get("block") or {}
         if isinstance(block_obj, dict):
             block = block_obj.get("name", "unknown")
         else:
             block = "unknown"
-
         block_safe = self._sanitize_filename(block)
         fname = f"step_{pos:02d}_{sid}_{block_safe}.json"
         self.save_json(step, parent_dir, fname)

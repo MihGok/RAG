@@ -1,41 +1,43 @@
+"""
+main.py
+────────
+Точка входа. Запускает интерактивный пайплайн поиска и скачивания курсов.
+
+Использование:
+    python main.py
+    python main.py --courses 10   # скачать топ-10 курсов (по умолчанию 5)
+"""
+
+import sys
+import argparse
 import loading_workflow as workflow
 
 
-TARGET_TOPIC = "Python программирование"
-BATCH_SIZE = 10
-DOWNLOAD_THRESHOLD = 7 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Поиск и скачивание курсов со Stepik"
+    )
+    parser.add_argument(
+        "--courses",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Количество топ-курсов для скачивания (по умолчанию: 5)",
+    )
+    return parser.parse_args()
+
 
 def main():
-    # 1. Поиск и сбор данных (Stepik)
-    loader, raw_courses = workflow.fetch_stepik_courses(
-        topic=TARGET_TOPIC, 
-        limit=40
-    )
-    
-    if not raw_courses:
-        return
+    args = parse_args()
 
-    # 2. Интеллектуальный анализ (Local LLM)
-    analyzed_results = workflow.analyze_courses_relevance(
-        raw_courses=raw_courses,
-        topic=TARGET_TOPIC,
-        llm_endpoint=LLM_ENDPOINT,
-        batch_size=BATCH_SIZE
-    )
+    session_dir = workflow.run_pipeline(max_courses=args.courses)
 
+    if session_dir:
+        print(f"\nСессия завершена: {session_dir}")
+    else:
+        print("\nПайплайн завершился с ошибкой.")
+        sys.exit(1)
 
-    workflow.print_top_results(analyzed_results, top_n=20)
-
-
-    workflow.download_top_courses(
-        loader=loader,
-        analyzed_courses=analyzed_results,
-        raw_courses=raw_courses,
-        min_score=DOWNLOAD_THRESHOLD,
-
-        topic=TARGET_TOPIC,
-        llm_endpoint=LLM_ENDPOINT
-    )
 
 if __name__ == "__main__":
     main()

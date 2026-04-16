@@ -105,7 +105,12 @@ def _schema_to_grammar(schema: dict | None) -> LlamaGrammar | None:
     if schema is None:
         return None
     try:
-        converter = SchemaConverter({})
+        converter = SchemaConverter(
+            prop_order={},
+            allow_fetch=False,
+            dotall=False,
+            raw_pattern=False,
+        )
         converter.visit(schema, "")
         grammar_text = converter.format_grammar()
         return LlamaGrammar.from_string(grammar_text, verbose=False)

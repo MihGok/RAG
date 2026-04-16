@@ -2,13 +2,6 @@
 schemas.py
 ──────────
 JSON-схемы для структурированного вывода LLM и Gemini.
-
-Передаются в:
-  • llm_client.run_llm(response_schema=get_schema("summary"))
-  • gemini_client.run_gemini(response_schema=get_schema("tagging"))
-
-Импорт:
-    from schemas import get_schema, SCHEMAS, list_schemas
 """
 
 from typing import Any
@@ -20,7 +13,6 @@ Schema = dict[str, Any]
 #  RAG-задачи
 # ════════════════════════════════════════════════════════════════════════════
 
-# ── 1. Тегирование ───────────────────────────────────────────────────────────
 TAGGING: Schema = {
     "type": "object",
     "properties": {
@@ -43,7 +35,6 @@ TAGGING: Schema = {
     "required": ["tags", "primary_tag"],
 }
 
-# ── 2. Суммаризация ───────────────────────────────────────────────────────────
 SUMMARY: Schema = {
     "type": "object",
     "properties": {
@@ -74,44 +65,96 @@ SUMMARY: Schema = {
     "required": ["summary", "key_points", "topics"],
 }
 
-# ── 3. Объединение уроков ─────────────────────────────────────────────────────
 LESSON_MERGE: Schema = {
     "type": "object",
     "properties": {
-        "merged_title": {
-            "type": "string",
-            "description": "Обобщённое название объединённого урока.",
-        },
-        "merged_summary": {
-            "type": "string",
-            "description": "Единое резюме объединённого урока.",
-        },
+        "merged_title": {"type": "string"},
+        "merged_summary": {"type": "string"},
         "merged_key_points": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Объединённый список ключевых тезисов без дублей.",
         },
         "merged_tags": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Объединённый список тегов.",
         },
         "topics_covered": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Все темы, охваченные объединённым уроком.",
         },
-        "source_lessons_count": {
-            "type": "integer",
-            "description": "Количество объединяемых уроков.",
-        },
-        "duplicate_content_found": {
-            "type": "boolean",
-            "description": "Были ли обнаружены дублирующиеся разделы.",
-        },
+        "source_lessons_count": {"type": "integer"},
+        "duplicate_content_found": {"type": "boolean"},
     },
     "required": ["merged_title", "merged_summary", "merged_key_points", "merged_tags"],
 }
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  PIPELINE-схемы (для интерактивного пайплайна поиска курсов)
+# ════════════════════════════════════════════════════════════════════════════
+
+CLARIFYING_QUESTIONS: Schema = {
+    "type": "object",
+    "properties": {
+        "questions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "3–5 уточняющих вопросов пользователю на русском языке.",
+        }
+    },
+    "required": ["questions"],
+}
+
+PIPELINE_SETUP: Schema = {
+    "type": "object",
+    "properties": {
+        "search_queries": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Ровно 3 поисковых запроса для платформы Stepik на русском языке.",
+        },
+        "tag_map": {
+            "type": "object",
+            "description": "Карта тегов по категориям. Ключи — категории, значения — списки тегов.",
+            "additionalProperties": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        },
+    },
+    "required": ["search_queries", "tag_map"],
+}
+
+COURSE_RANKING: Schema = {
+    "type": "object",
+    "properties": {
+        "rankings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "integer",
+                        "description": "ID курса из входного списка.",
+                    },
+                    "score": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 10,
+                        "description": "Оценка релевантности от 1 до 10.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Краткое обоснование оценки.",
+                    },
+                },
+                "required": ["id", "score", "reason"],
+            },
+        }
+    },
+    "required": ["rankings"],
+}
+
 
 # ════════════════════════════════════════════════════════════════════════════
 #  Общие схемы
@@ -121,11 +164,7 @@ TEXT_RESPONSE: Schema = {
     "type": "object",
     "properties": {
         "response": {"type": "string"},
-        "confidence": {
-            "type": "number",
-            "minimum": 0.0,
-            "maximum": 1.0,
-        },
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
     },
     "required": ["response"],
 }
@@ -134,10 +173,7 @@ CLASSIFICATION: Schema = {
     "type": "object",
     "properties": {
         "label": {"type": "string"},
-        "labels": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
+        "labels": {"type": "array", "items": {"type": "string"}},
         "explanation": {"type": "string"},
     },
     "required": ["label", "labels"],
@@ -157,7 +193,7 @@ NER: Schema = {
                         "enum": ["PERSON", "ORG", "LOC", "DATE", "MONEY", "PRODUCT", "OTHER"],
                     },
                     "start": {"type": "integer"},
-                    "end":   {"type": "integer"},
+                    "end": {"type": "integer"},
                 },
                 "required": ["text", "type"],
             },
@@ -173,11 +209,7 @@ SENTIMENT: Schema = {
             "type": "string",
             "enum": ["positive", "negative", "neutral", "mixed"],
         },
-        "score": {
-            "type": "number",
-            "minimum": -1.0,
-            "maximum": 1.0,
-        },
+        "score": {"type": "number", "minimum": -1.0, "maximum": 1.0},
         "aspects": {
             "type": "array",
             "items": {
@@ -199,9 +231,9 @@ SENTIMENT: Schema = {
 QA: Schema = {
     "type": "object",
     "properties": {
-        "answer":         {"type": "string"},
+        "answer": {"type": "string"},
         "source_excerpt": {"type": "string"},
-        "is_answerable":  {"type": "boolean"},
+        "is_answerable": {"type": "boolean"},
     },
     "required": ["answer", "is_answerable"],
 }
@@ -209,8 +241,8 @@ QA: Schema = {
 TRANSCRIPTION: Schema = {
     "type": "object",
     "properties": {
-        "text":             {"type": "string"},
-        "language":         {"type": "string"},
+        "text": {"type": "string"},
+        "language": {"type": "string"},
         "duration_seconds": {"type": "number"},
         "segments": {
             "type": "array",
@@ -218,8 +250,8 @@ TRANSCRIPTION: Schema = {
                 "type": "object",
                 "properties": {
                     "start": {"type": "number"},
-                    "end":   {"type": "number"},
-                    "text":  {"type": "string"},
+                    "end": {"type": "number"},
+                    "text": {"type": "string"},
                 },
                 "required": ["start", "end", "text"],
             },
@@ -235,39 +267,39 @@ TRANSCRIPTION: Schema = {
 
 SCHEMAS: dict[str, Schema] = {
     # RAG-задачи
-    "tagging":        TAGGING,
-    "summary":        SUMMARY,
-    "lesson_merge":   LESSON_MERGE,
+    "tagging":               TAGGING,
+    "summary":               SUMMARY,
+    "lesson_merge":          LESSON_MERGE,
+    # Pipeline
+    "clarifying_questions":  CLARIFYING_QUESTIONS,
+    "pipeline_setup":        PIPELINE_SETUP,
+    "course_ranking":        COURSE_RANKING,
     # Общие
-    "text":           TEXT_RESPONSE,
-    "classification": CLASSIFICATION,
-    "ner":            NER,
-    "sentiment":      SENTIMENT,
-    "qa":             QA,
-    "transcription":  TRANSCRIPTION,
+    "text":                  TEXT_RESPONSE,
+    "classification":        CLASSIFICATION,
+    "ner":                   NER,
+    "sentiment":             SENTIMENT,
+    "qa":                    QA,
+    "transcription":         TRANSCRIPTION,
 }
 
-# Описания для документации
 SCHEMA_DESCRIPTIONS: dict[str, str] = {
-    "tagging":        "Тегирование текста: список тегов + главный тег",
-    "summary":        "Суммаризация: резюме + ключевые тезисы + темы + уровень сложности",
-    "lesson_merge":   "Объединение уроков: единое резюме, теги, ключевые тезисы",
-    "text":           "Простой текстовый ответ",
-    "classification": "Классификация текста",
-    "ner":            "Извлечение именованных сущностей",
-    "sentiment":      "Анализ тональности",
-    "qa":             "Вопрос-ответ с источником",
-    "transcription":  "Транскрипция с сегментами",
+    "tagging":               "Тегирование текста: список тегов + главный тег",
+    "summary":               "Суммаризация: резюме + ключевые тезисы + темы + уровень сложности",
+    "lesson_merge":          "Объединение уроков: единое резюме, теги, ключевые тезисы",
+    "clarifying_questions":  "Pipeline: уточняющие вопросы к пользователю",
+    "pipeline_setup":        "Pipeline: 3 поисковых запроса + карта тегов",
+    "course_ranking":        "Pipeline: ранжирование курсов по релевантности",
+    "text":                  "Простой текстовый ответ",
+    "classification":        "Классификация текста",
+    "ner":                   "Извлечение именованных сущностей",
+    "sentiment":             "Анализ тональности",
+    "qa":                    "Вопрос-ответ с источником",
+    "transcription":         "Транскрипция с сегментами",
 }
 
 
 def get_schema(name: str) -> Schema:
-    """
-    Вернуть схему по имени.
-
-    Raises:
-        ValueError: если схема не найдена.
-    """
     if name not in SCHEMAS:
         raise ValueError(
             f"Схема '{name}' не найдена. Доступные: {list(SCHEMAS.keys())}"
@@ -276,11 +308,7 @@ def get_schema(name: str) -> Schema:
 
 
 def list_schemas() -> list[dict]:
-    """Вернуть список всех схем с описаниями."""
     return [
-        {
-            "name":        name,
-            "description": SCHEMA_DESCRIPTIONS.get(name, ""),
-        }
+        {"name": name, "description": SCHEMA_DESCRIPTIONS.get(name, "")}
         for name in SCHEMAS
     ]

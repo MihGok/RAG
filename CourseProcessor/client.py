@@ -3,54 +3,38 @@ from typing import Dict, Any, List, Optional
 
 import requests
 
+from config import AppConfig  # BUG FIX: was missing
+
 
 class Client:
     """
     Клиент для взаимодействия с ML Backend.
 
-    Поддержка:
-    - POST /task с task_type='video'
-    - новый формат ответа backend:
-      {
-          "task_type": "video",
-          "result": {
-              "transcript": "...",
-              "segments": [...]
-          }
-      }
-
-    Изменения относительно старой версии:
-    - /transcribe больше не используется
-    - потоки и параллельная batch-обработка убраны
-    - batch выполняется последовательно, что лучше подходит под один GPU-backend
-    - добавлены retry и backoff
+    POST /task с task_type='video' для транскрибации.
+    Формат ответа:
+        {
+            "task_type": "video",
+            "result": {
+                "transcript": "...",
+                "segments": [...]
+            }
+        }
     """
 
     ML_BACKEND_URL = AppConfig.ML_SERVER_URL.rstrip("/")
     TASK_ENDPOINT = f"{ML_BACKEND_URL}/task"
     HEALTH_ENDPOINT = f"{ML_BACKEND_URL}/health"
 
-    # Для одного backend / одного GPU параллелизм не нужен
     MAX_TRANSCRIBE_WORKERS = 1
 
-    # Таймауты
     CONNECT_TIMEOUT_SECONDS = 5
     REQUEST_TIMEOUT_SECONDS = 1800  # до 30 минут на длинное видео
 
-    # Retry
     RETRY_COUNT = 3
     RETRY_BACKOFF_BASE = 2.0
 
     @classmethod
-    def _get_session(cls, use_proxy: bool = False) -> requests.Session:
-        """
-        Возвращает requests.Session.
-        Если ProxyConfig существует в проекте — использует его.
-        Иначе создаёт обычную сессию.
-        """
-        proxy_cfg = globals().get("ProxyConfig")
-        if proxy_cfg is not None and hasattr(proxy_cfg, "get_session_with_proxy"):
-            return proxy_cfg.get_session_with_proxy(use_proxy=use_proxy)
+    def _get_session(cls) -> requests.Session:
         return requests.Session()
 
     @classmethod
@@ -58,13 +42,6 @@ class Client:
         """
         Приводит ответ backend'а к единому виду:
         {"text": "...", "segments": [...]}
-
-        Поддерживает:
-        1) новый формат:
-           {"task_type": "video", "result": {"transcript": "...", "segments": [...]}}
-
-        2) fallback-формат:
-           {"transcript": "...", "segments": [...]}
         """
         if not isinstance(data, dict):
             return {"text": "", "segments": []}
@@ -93,10 +70,6 @@ class Client:
         """
         Транскрибирует одно видео через POST /task.
 
-        Args:
-            video_url: URL видео
-            step_id: ID шага для логов
-
         Returns:
             {"text": "полная транскрипция", "segments": [...]}
         """
@@ -105,7 +78,7 @@ class Client:
             "url": video_url,
         }
 
-        session = cls._get_session(use_proxy=False)
+        session = cls._get_session()
         last_error: Optional[Exception] = None
 
         try:
@@ -130,12 +103,11 @@ class Client:
                     last_error = e
                     if attempt >= cls.RETRY_COUNT:
                         break
-
                     sleep_for = cls.RETRY_BACKOFF_BASE ** (attempt - 1)
                     print(
                         f"   [Transcribe Retry] Step {step_id}: "
-                        f"attempt {attempt}/{cls.RETRY_COUNT} failed ({e}), "
-                        f"retry in {sleep_for:.1f}s"
+                        f"попытка {attempt}/{cls.RETRY_COUNT} ({e}), "
+                        f"жду {sleep_for:.1f}s"
                     )
                     time.sleep(sleep_for)
 
@@ -143,12 +115,11 @@ class Client:
                     last_error = e
                     if attempt >= cls.RETRY_COUNT:
                         break
-
                     sleep_for = cls.RETRY_BACKOFF_BASE ** (attempt - 1)
                     print(
                         f"   [Transcribe Retry] Step {step_id}: "
-                        f"attempt {attempt}/{cls.RETRY_COUNT} failed ({e}), "
-                        f"retry in {sleep_for:.1f}s"
+                        f"попытка {attempt}/{cls.RETRY_COUNT} ({e}), "
+                        f"жду {sleep_for:.1f}s"
                     )
                     time.sleep(sleep_for)
 
@@ -168,7 +139,7 @@ class Client:
     @classmethod
     def transcribe_batch(cls, videos: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
         """
-        Последовательная транскрибация списка видео без потоков.
+        Последовательная транскрибация списка видео.
 
         Args:
             videos: [{"step_id": 123, "video_url": "..."}, ...]
@@ -179,8 +150,7 @@ class Client:
         if not videos:
             return {}
 
-        print(f"   [Transcribe Batch] Обработка {len(videos)} видео последовательно...")
-
+        print(f"   [Transcribe Batch] {len(videos)} видео последовательно...")
         results: Dict[int, Dict[str, Any]] = {}
 
         for idx, item in enumerate(videos, start=1):
@@ -212,10 +182,8 @@ class Client:
 
     @classmethod
     def health(cls) -> bool:
-        """
-        Проверка доступности backend.
-        """
-        session = cls._get_session(use_proxy=False)
+        """Проверка доступности backend."""
+        session = cls._get_session()
         try:
             response = session.get(cls.HEALTH_ENDPOINT, timeout=5)
             return response.status_code == 200
