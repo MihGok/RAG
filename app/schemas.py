@@ -157,6 +157,104 @@ COURSE_RANKING: Schema = {
 
 
 # ════════════════════════════════════════════════════════════════════════════
+#  STAGE 2 — Кластеризация, объединение, генерация курса
+# ════════════════════════════════════════════════════════════════════════════
+
+CLUSTER_MERGE_DECISION: Schema = {
+    "type": "object",
+    "properties": {
+        "groups": {
+            "type": "array",
+            "description": "Группы индексов уроков для объединения.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "indices": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Индексы уроков (0-based) в данной группе.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Краткое обоснование объединения.",
+                    },
+                },
+                "required": ["indices"],
+            },
+        }
+    },
+    "required": ["groups"],
+}
+
+CHUNK_GENERATION: Schema = {
+    "type": "object",
+    "properties": {
+        "final_title": {
+            "type": "string",
+            "description": "Итоговое краткое название чанка знаний.",
+        },
+        "summary": {
+            "type": "string",
+            "description": (
+                "3–5 предложений с ключевыми понятиями и их взаимосвязями. "
+                "Например: 'Рассматривается взаимосвязь accuracy и F1-score...'"
+            ),
+        },
+        "tags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "5–15 конкретных тегов, преимущественно из карты тегов.",
+        },
+        "merged_text": {
+            "type": "string",
+            "description": (
+                "Глубокий структурированный конспект материала. "
+                "Не просто конкатенация источников."
+            ),
+        },
+    },
+    "required": ["final_title", "summary", "tags", "merged_text"],
+}
+
+COURSE_STRUCTURE: Schema = {
+    "type": "object",
+    "properties": {
+        "course_title": {"type": "string"},
+        "modules": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "query_texts": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Ровно 3 поисковых запроса к базе знаний.",
+                                },
+                                "tags": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Теги из карты тегов для данного шага.",
+                                },
+                            },
+                            "required": ["title", "query_texts", "tags"],
+                        },
+                    },
+                },
+                "required": ["title", "steps"],
+            },
+        },
+    },
+    "required": ["course_title", "modules"],
+}
+
+# ════════════════════════════════════════════════════════════════════════════
 #  Общие схемы
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -267,35 +365,42 @@ TRANSCRIPTION: Schema = {
 
 SCHEMAS: dict[str, Schema] = {
     # RAG-задачи
-    "tagging":               TAGGING,
-    "summary":               SUMMARY,
-    "lesson_merge":          LESSON_MERGE,
-    # Pipeline
-    "clarifying_questions":  CLARIFYING_QUESTIONS,
-    "pipeline_setup":        PIPELINE_SETUP,
-    "course_ranking":        COURSE_RANKING,
+    "tagging":                TAGGING,
+    "summary":                SUMMARY,
+    "lesson_merge":           LESSON_MERGE,
+    # Pipeline (Stage 1)
+    "clarifying_questions":   CLARIFYING_QUESTIONS,
+    "pipeline_setup":         PIPELINE_SETUP,
+    "course_ranking":         COURSE_RANKING,
+    # Stage 2
+    "cluster_merge_decision": CLUSTER_MERGE_DECISION,
+    "chunk_generation":       CHUNK_GENERATION,
+    "course_structure":       COURSE_STRUCTURE,
     # Общие
-    "text":                  TEXT_RESPONSE,
-    "classification":        CLASSIFICATION,
-    "ner":                   NER,
-    "sentiment":             SENTIMENT,
-    "qa":                    QA,
-    "transcription":         TRANSCRIPTION,
+    "text":                   TEXT_RESPONSE,
+    "classification":         CLASSIFICATION,
+    "ner":                    NER,
+    "sentiment":              SENTIMENT,
+    "qa":                     QA,
+    "transcription":          TRANSCRIPTION,
 }
 
 SCHEMA_DESCRIPTIONS: dict[str, str] = {
-    "tagging":               "Тегирование текста: список тегов + главный тег",
-    "summary":               "Суммаризация: резюме + ключевые тезисы + темы + уровень сложности",
-    "lesson_merge":          "Объединение уроков: единое резюме, теги, ключевые тезисы",
-    "clarifying_questions":  "Pipeline: уточняющие вопросы к пользователю",
-    "pipeline_setup":        "Pipeline: 3 поисковых запроса + карта тегов",
-    "course_ranking":        "Pipeline: ранжирование курсов по релевантности",
-    "text":                  "Простой текстовый ответ",
-    "classification":        "Классификация текста",
-    "ner":                   "Извлечение именованных сущностей",
-    "sentiment":             "Анализ тональности",
-    "qa":                    "Вопрос-ответ с источником",
-    "transcription":         "Транскрипция с сегментами",
+    "tagging":                "Тегирование текста: список тегов + главный тег",
+    "summary":                "Суммаризация: резюме + ключевые тезисы + темы + уровень сложности",
+    "lesson_merge":           "Объединение уроков: единое резюме, теги, ключевые тезисы",
+    "clarifying_questions":   "Pipeline: уточняющие вопросы к пользователю",
+    "pipeline_setup":         "Pipeline: 3 поисковых запроса + карта тегов",
+    "course_ranking":         "Pipeline: ранжирование курсов по релевантности",
+    "cluster_merge_decision": "Stage2: решение о слиянии уроков внутри кластера",
+    "chunk_generation":       "Stage2: генерация чанка (title, summary, tags, text)",
+    "course_structure":       "Stage2: структура курса (модули, шаги, запросы, теги)",
+    "text":                   "Простой текстовый ответ",
+    "classification":         "Классификация текста",
+    "ner":                    "Извлечение именованных сущностей",
+    "sentiment":              "Анализ тональности",
+    "qa":                     "Вопрос-ответ с источником",
+    "transcription":          "Транскрипция с сегментами",
 }
 
 

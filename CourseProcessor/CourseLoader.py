@@ -430,11 +430,15 @@ class StepikCourseLoader:
     # NEW: SESSION-BASED DOWNLOAD
     # ─────────────────────────────────────────────
 
-    def process_course_to_session(self, course: Dict[str, Any], raw_data_dir: str):
+    def process_course_to_session(
+        self,
+        course: Dict[str, Any],
+        raw_data_dir: str,
+        transcribe: bool = True,
+    ):
         """
         Скачивает все уроки курса и сохраняет в {raw_data_dir}/{lesson_name}.json.
-        Каждый файл содержит: lesson_name, lesson_id, course_title,
-        text (из текстовых шагов), transcript (из видео-шагов).
+        transcribe=False пропускает транскрибацию видео.
         """
         cid = course.get("id")
         course_title = course.get("title", f"course_{cid}")
@@ -468,7 +472,9 @@ class StepikCourseLoader:
                 lid = unit.get("lesson")
                 lesson = lessons_map.get(lid)
                 if lesson:
-                    self._process_lesson_to_raw(lesson, unit, course_title, cid, raw_data_dir)
+                    self._process_lesson_to_raw(
+                        lesson, unit, course_title, cid, raw_data_dir, transcribe=transcribe
+                    )
 
     def _process_lesson_to_raw(
         self,
@@ -477,6 +483,7 @@ class StepikCourseLoader:
         course_title: str,
         course_id: int,
         raw_data_dir: str,
+        transcribe: bool = True,
     ):
         """Обрабатывает один урок: собирает текст + транскрипции → сохраняет в raw_data."""
         lesson_id = lesson.get("id")
@@ -525,9 +532,9 @@ class StepikCourseLoader:
                             "video_url": video_url,
                         })
 
-        # Транскрибируем видео
+        # Транскрибируем видео (если разрешено)
         transcripts = []
-        if videos_to_transcribe:
+        if videos_to_transcribe and transcribe:
             try:
                 from CourseProcessor.client import Client
                 results = Client.transcribe_batch(videos_to_transcribe)
@@ -537,6 +544,8 @@ class StepikCourseLoader:
                         transcripts.append(t)
             except Exception as e:
                 print(f"   [Transcribe Error] {lesson_title}: {e}")
+        elif videos_to_transcribe and not transcribe:
+            print(f"   [Skip Transcribe] {lesson_title}: {len(videos_to_transcribe)} видео пропущено (--no-transcribe)")
 
         combined_text = "\n\n".join(text_parts)
         combined_transcript = "\n\n".join(transcripts)
