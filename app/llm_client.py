@@ -97,10 +97,6 @@ def _get_model(
         return model
 
 
-# ────────────────────────────────────────────────────────────────────────────
-#  Вспомогательные функции
-# ────────────────────────────────────────────────────────────────────────────
-
 def _schema_to_grammar(schema: dict | None) -> LlamaGrammar | None:
     if schema is None:
         return None
@@ -136,10 +132,6 @@ def _parse_response(raw: str, schema: dict | None) -> Any:
         logger.warning("Не удалось распарсить JSON ответ, возвращаем как текст.")
         return {"response": raw.strip(), "_parse_error": True}
 
-
-# ────────────────────────────────────────────────────────────────────────────
-#  Публичный API
-# ────────────────────────────────────────────────────────────────────────────
 
 def run_llm(
     model_name: str,

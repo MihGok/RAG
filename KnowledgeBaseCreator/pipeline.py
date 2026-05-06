@@ -1,17 +1,3 @@
-"""
-stage2/pipeline.py
-──────────────────
-Оркестрация Stage 2:
-  1. Загрузка и векторизация уроков
-  2. Ансамблевая кластеризация
-  3. LLM-решения об объединении (Qwen)
-  4. Генерация чанков (Qwen)
-  5. Индексация в Qdrant (dense + sparse)
-  6. Генерация структуры курса (T-lite)
-  7. Генерация DOCX-документа
-  8. Сохранение в MongoDB + PostgreSQL
-"""
-
 from __future__ import annotations
 
 import json
@@ -19,18 +5,18 @@ import logging
 import os
 from typing import Callable, Dict, Any, List, Optional
 
-from stage2.embedder       import embed_lesson_names
-from stage2.clusterer      import cluster_embeddings, labels_to_groups
-from stage2.merger         import decide_merges_in_cluster, generate_chunk
+from .embedder       import embed_lesson_names
+from .clusterer      import cluster_embeddings, labels_to_groups
+from .merger         import decide_merges_in_cluster, generate_chunk
 from db.qdrant_indexer import index_all_chunks
-from stage2.course_generator import generate_course_structure, save_course
-from stage2.doc_generator  import generate_course_docx
+from .course_generator import generate_course_structure, save_course
+from .doc_generator  import generate_course_docx
 
 logger = logging.getLogger(__name__)
 
-EMBED_MODEL  = "Qwen3-Embedding-0.6B-f16.gguf"
+EMBED_MODEL  = "Qwen3-Embedding-0.6B-BF16.gguf"
 MERGE_MODEL  = "Qwen2.5-3B-Instruct-Q4_K_L.gguf"
-COURSE_MODEL = "T-lite-it-1.0-Q4_K_M.gguf"
+COURSE_MODEL = "t-lite-it-1.0-q4_k_m.gguf"
 
 
 # ─── HELPERS ─────────────────────────────────────────────────────────────────

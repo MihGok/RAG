@@ -338,7 +338,7 @@ def _run_pipeline_bg(
             return
 
         # ── Stage 2 ──────────────────────────────────────────────────────
-        from stage2.pipeline import run_stage2
+        from KnowledgeBaseCreator.pipeline import run_stage2
 
         chat_id = conv.get("chat_id")
         result  = run_stage2(
@@ -734,7 +734,7 @@ with gr.Blocks(title="CourseRAG") as demo:
             )
 
             transcribe_check = gr.Checkbox(
-                value=True,
+                value=False,
                 label="Транскрибировать видео",
                 elem_id="transcribe-check",
                 info="Снимите для ускорения без видео",

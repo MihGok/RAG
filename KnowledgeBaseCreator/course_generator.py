@@ -15,6 +15,7 @@ from typing import List, Dict, Any, Optional
 import requests
 
 from config import AppConfig
+from LLMprompts import PromptBank
 from db.mongo_service import save_course_structure
 from db.postgres_service import save_course_with_sections
 
@@ -61,7 +62,7 @@ def _call_llm(prompt: str, schema_name: str, model_name: str, n_ctx: int = 8192)
 def generate_course_structure(
     topic: str,
     chunks: List[Dict[str, Any]],
-    tag_map: Dict[str, List[str]],
+    tag_map,  # flat list[str] or dict
     model_name: str = COURSE_STRUCTURE_MODEL,
     log_fn=None,
 ) -> Dict[str, Any]:
@@ -100,26 +101,16 @@ def generate_course_structure(
             "brief": chunk.get("summary", "")[:150],
         })
 
-    # Карта тегов: первые 60 тегов
-    all_tags: list[str] = []
-    for tlist in tag_map.values():
-        all_tags.extend(tlist)
-    tag_sample = sorted(set(all_tags))[:60]
+    # tag_map может быть плоским списком или словарём (обратная совместимость)
+    if isinstance(tag_map, list):
+        tag_sample = sorted(set(tag_map))[:60]
+    else:
+        all_tags: list[str] = []
+        for tlist in (tag_map.values() if isinstance(tag_map, dict) else []):
+            all_tags.extend(tlist)
+        tag_sample = sorted(set(all_tags))[:60]
 
-    prompt = (
-        f"Создай структуру образовательного курса по теме: \"{topic}\"\n\n"
-        f"Доступные учебные материалы (чанки знаний):\n"
-        f"{json.dumps(chunk_summaries, ensure_ascii=False, indent=2)}\n\n"
-        f"Карта тегов (обязательно используй при тегировании шагов):\n"
-        f"{', '.join(tag_sample)}\n\n"
-        f"Требования к структуре:\n"
-        f"- 3–6 модулей, логически выстроенных от простого к сложному\n"
-        f"- В каждом модуле 3–7 шагов\n"
-        f"- Для каждого шага — ровно 3 поисковых запроса к базе знаний\n"
-        f"  (query_texts: конкретные формулировки для семантического поиска)\n"
-        f"- Для каждого шага — список тегов из карты тегов\n"
-        f"- Верни только JSON по схеме course_structure"
-    )
+    prompt = PromptBank.course_structure(topic, chunk_summaries, tag_sample)
 
     _log("[CourseGen] Генерирую структуру курса через LLM...")
     result = _call_llm(prompt, "course_structure", model_name)

@@ -22,7 +22,7 @@ from qdrant_client.models import (
     SparseVector,
 )
 
-from stage2.embedder import embed_text
+from KnowledgeBaseCreator.embedder import embed_text
 from config import AppConfig
 
 logger = logging.getLogger(__name__)
