@@ -34,6 +34,9 @@ RUN python -m pip uninstall -y llama-cpp-python || true && \
       llama-cpp-python \
       --config-setting="cmake.args=-DGGML_CUDA=ON"
 
+RUN python -m pip install --no-cache-dir outlines
+
+
 # ── faster-whisper ───────────────────────────
 RUN python -m pip install --no-cache-dir \
     faster-whisper \

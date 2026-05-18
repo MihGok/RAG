@@ -311,6 +311,7 @@ def _rag_answer(question: str, conv: dict) -> str:
 def _run_pipeline_bg(
     topic: str,
     user_answers: str,
+    clarifying_questions: list,
     conv: dict,
     user_state: dict,
     log_buffer: list,
@@ -318,28 +319,29 @@ def _run_pipeline_bg(
     done_event: threading.Event,
     transcribe: bool,
 ):
-    """Запускается в фоновом потоке. Пишет прогресс в log_buffer."""
+
     try:
         def _log(msg: str):
             log_buffer.append(msg)
-
+ 
         # ── Stage 1 ──────────────────────────────────────────────────────
         session_dir = wf.run_stage1(
             topic=topic,
             user_answers=user_answers,
+            clarifying_questions=clarifying_questions,   # ← НОВОЕ
             max_courses=5,
             limit_per_query=30,
             transcribe=transcribe,
             log_fn=_log,
         )
-
+ 
         if not session_dir:
             result_holder["error"] = "Stage 1 не вернул папку сессии"
             return
-
+ 
         # ── Stage 2 ──────────────────────────────────────────────────────
         from KnowledgeBaseCreator.pipeline import run_stage2
-
+ 
         chat_id = conv.get("chat_id")
         result  = run_stage2(
             session_dir=session_dir,
@@ -349,13 +351,12 @@ def _run_pipeline_bg(
         )
         result["session_dir"] = session_dir
         result_holder["result"] = result
-
+ 
     except Exception as e:
         result_holder["error"] = str(e)
         log_buffer.append(f"❌ Критическая ошибка: {e}")
     finally:
         done_event.set()
-
 
 # ─── MESSAGE HANDLER ─────────────────────────────────────────────────────────
 
@@ -410,24 +411,32 @@ def handle_message(
         yield history, conv, gr.update(visible=False), None, gr.update()
         return
 
-    # Stage: questions → запускаем генерацию
     if stage == "questions":
         conv = {**conv, "user_answers": message, "stage": "generating"}
         topic = conv.get("topic", message)
-
+ 
         # Начальное сообщение
         history = history + [{"role": "assistant", "content": "🚀 Запускаю создание курса..."}]
         yield history, conv, gr.update(visible=False), None, gr.update()
-
+ 
         # Запускаем pipeline в фоне
         log_buffer:    list  = []
         result_holder: dict  = {}
         done_event = threading.Event()
-
+ 
         t = threading.Thread(
             target=_run_pipeline_bg,
-            args=(topic, message, conv, user_state,
-                  log_buffer, result_holder, done_event, transcribe),
+            args=(
+                topic,
+                message,
+                conv.get("questions", []),   # ← НОВОЕ: передаём уточняющие вопросы
+                conv,
+                user_state,
+                log_buffer,
+                result_holder,
+                done_event,
+                transcribe,
+            ),
             daemon=True,
         )
         t.start()

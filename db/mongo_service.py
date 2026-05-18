@@ -1,19 +1,24 @@
 """
 db/mongo_service.py
 ───────────────────
-MongoDB для хранения структуры сгенерированных курсов.
-Коллекция: generated_courses
+MongoDB для хранения структур курсов.
+
+Коллекции:
+  generated_courses — Stage 2 структура (модули → шаги с query_texts/tags)
+  syllabi           — Stage 1 силлабус (модули → цели, key_topics)
+                      Хранит детальный план от 9B-модели с thinking.
+  sessions          — мета-информация о сессиях
 """
 
 from __future__ import annotations
 
-import os
 import logging
-from typing import Optional, Any
+import os
+from typing import Any, Dict, List, Optional
 
+from bson import ObjectId
 from pymongo import MongoClient
 from pymongo.collection import Collection
-from bson import ObjectId
 
 logger = logging.getLogger(__name__)
 
@@ -31,72 +36,121 @@ def get_client() -> MongoClient:
     return _client
 
 
-def get_courses_collection() -> Collection:
-    return get_client()[_DB_NAME]["generated_courses"]
+def _col(name: str) -> Collection:
+    return get_client()[_DB_NAME][name]
 
 
-def get_sessions_collection() -> Collection:
-    return get_client()[_DB_NAME]["sessions"]
+# ─── SYLLABUS (Stage 1) ───────────────────────────────────────────────────────
 
-
-# ─── COURSE STRUCTURE ───────────────────────────────────────────────────────
-
-def save_course_structure(
-    course_structure: dict,
+def save_syllabus(
     session_id: str,
+    syllabus: Dict[str, Any],
     topic: str,
-    chunks_count: int = 0,
 ) -> str:
     """
-    Сохраняет полную структуру курса в MongoDB.
-    Возвращает строковый ID документа.
+    Сохраняет детальную структуру курса из Stage 1 (9B + thinking).
+
+    Коллекция: syllabi
+    Upsert по session_id — перезапись при повторном запуске Stage 1.
+
+    Returns:
+        session_id (используется как идентификатор в downstream)
     """
     doc = {
-        "session_id":    session_id,
-        "topic":         topic,
-        "course_title":  course_structure.get("course_title", ""),
-        "modules":       course_structure.get("modules", []),
-        "chunks_count":  chunks_count,
+        "session_id":        session_id,
+        "topic":             topic,
+        "course_title":      syllabus.get("course_title", ""),
+        "course_description": syllabus.get("course_description", ""),
+        "course_goals":      syllabus.get("course_goals", []),
+        "modules": [
+            {
+                "id":          m.get("id"),
+                "title":       m.get("title", ""),
+                "description": m.get("description", ""),
+                "goals":       m.get("goals", []),
+                "key_topics":  m.get("key_topics", []),
+            }
+            for m in syllabus.get("modules", [])
+        ],
+        "n_modules": len(syllabus.get("modules", [])),
     }
-    col = get_courses_collection()
-    result = col.insert_one(doc)
-    mongo_id = str(result.inserted_id)
-    logger.info("MongoDB: курс сохранён, id=%s", mongo_id)
-    return mongo_id
+
+    _col("syllabi").replace_one(
+        {"session_id": session_id},
+        doc,
+        upsert=True,
+    )
+    logger.info("MongoDB[syllabi]: силлабус сохранён, session_id=%s", session_id)
+    return session_id
 
 
-def get_course_structure(mongo_id: str) -> Optional[dict]:
-    col = get_courses_collection()
-    doc = col.find_one({"_id": ObjectId(mongo_id)})
+def get_syllabus(session_id: str) -> Optional[Dict[str, Any]]:
+    """Загрузить силлабус Stage 1 по session_id."""
+    doc = _col("syllabi").find_one({"session_id": session_id})
     if doc:
         doc["_id"] = str(doc["_id"])
     return doc
 
 
-def list_courses_by_session(session_id: str) -> list[dict]:
-    col = get_courses_collection()
-    docs = list(col.find({"session_id": session_id}))
+# ─── COURSE STRUCTURE (Stage 2) ───────────────────────────────────────────────
+
+def save_course_structure(
+    course_structure: Dict[str, Any],
+    session_id: str,
+    topic: str,
+    chunks_count: int = 0,
+    syllabus_session_id: Optional[str] = None,
+) -> str:
+    """
+    Сохраняет Stage 2 структуру курса (T-lite: модули → шаги).
+
+    Args:
+        syllabus_session_id: session_id силлабуса Stage 1 для связи.
+                             Обычно совпадает с session_id.
+
+    Returns:
+        Строковый MongoDB _id документа.
+    """
+    doc = {
+        "session_id":          session_id,
+        "topic":               topic,
+        "course_title":        course_structure.get("course_title", ""),
+        "modules":             course_structure.get("modules", []),
+        "chunks_count":        chunks_count,
+        # Ссылка на Stage 1 силлабус для трассировки
+        "syllabus_session_id": syllabus_session_id or session_id,
+    }
+
+    result  = _col("generated_courses").insert_one(doc)
+    mongo_id = str(result.inserted_id)
+    logger.info("MongoDB[generated_courses]: курс сохранён, id=%s", mongo_id)
+    return mongo_id
+
+
+def get_course_structure(mongo_id: str) -> Optional[Dict[str, Any]]:
+    doc = _col("generated_courses").find_one({"_id": ObjectId(mongo_id)})
+    if doc:
+        doc["_id"] = str(doc["_id"])
+    return doc
+
+
+def list_courses_by_session(session_id: str) -> List[Dict[str, Any]]:
+    docs = list(_col("generated_courses").find({"session_id": session_id}))
     for d in docs:
         d["_id"] = str(d["_id"])
     return docs
 
 
-# ─── SESSION META ────────────────────────────────────────────────────────────
+# ─── SESSION META ─────────────────────────────────────────────────────────────
 
-def save_session_meta(session_id: str, meta: dict) -> str:
-    col = get_sessions_collection()
+def save_session_meta(session_id: str, meta: Dict[str, Any]) -> str:
     doc = {"session_id": session_id, **meta}
-    result = col.replace_one(
-        {"session_id": session_id},
-        doc,
-        upsert=True,
-    )
+    _col("sessions").replace_one({"session_id": session_id}, doc, upsert=True)
     return session_id
 
 
-def get_session_meta(session_id: str) -> Optional[dict]:
-    col = get_sessions_collection()
-    doc = col.find_one({"session_id": session_id})
+def get_session_meta(session_id: str) -> Optional[Dict[str, Any]]:
+    doc = _col("sessions").find_one({"session_id": session_id})
     if doc:
         doc["_id"] = str(doc["_id"])
     return doc

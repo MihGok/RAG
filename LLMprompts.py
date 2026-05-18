@@ -2,13 +2,24 @@
 LLMprompts.py
 ─────────────
 Все системные промпты для LLM в одном месте.
-Используется loading_workflow.py, stage2/merger.py и stage2/course_generator.py.
 
-Карта тегов — ПЛОСКАЯ: список строк, например:
-    ["Python", "TensorFlow", "NumPy", "обратное распространение ошибки", ...]
+Ключевые изменения в Stage 2:
+
+cluster_merge_decision():
+  Теперь принимает module_info и course_title — LLM принимает решение
+  о слиянии уроков с пониманием целей модуля и его места в курсе.
+
+chunk_generation():
+  Добавлен delta-контекст:
+    previously_covered_in_module  — что уже объяснено в текущем модуле
+    previously_covered_in_course  — что изучено в предыдущих модулях
+    module_info                   — цели и темы текущего модуля
+  Модель генерирует learned_concepts — список понятий, которые освоит
+  читатель, для передачи следующему чанку.
 """
 
 from __future__ import annotations
+
 import json
 from textwrap import dedent
 from typing import Any
@@ -17,7 +28,7 @@ from typing import Any
 class PromptBank:
 
     # ══════════════════════════════════════════════════════════════════════
-    #  STAGE 1 — поиск и фильтрация курсов
+    #  STAGE 1 — промпты без изменений
     # ══════════════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -31,12 +42,6 @@ class PromptBank:
            и узкой предметной области — НЕ о формате курса.
         2. Каждый вопрос должен провоцировать пользователя назвать конкретный
            термин (название библиотеки, алгоритма, задачи), который войдёт в теги.
-        
-        Примеры хороших вопросов (для темы «Машинное обучение»):
-           - «Какие библиотеки уже знаете или планируете использовать
-             (scikit-learn, PyTorch, TensorFlow)?»
-           - «Для каких задач нужен курс: CV, NLP или табличные данные?»
-           - «Нужно ли включить математическую базу (линейная алгебра, статистика)?»
         Верни ТОЛЬКО валидный JSON по схеме clarifying_questions.
         """).strip()
 
@@ -45,26 +50,10 @@ class PromptBank:
         return dedent(f"""
         Ты — AI-ассистент, формирующий метаданные для RAG-системы поиска по курсам Stepik.
         Тема курса: "{topic}"
-        Ответы пользователя:
-        {user_answers}
-        На основе этой информации создай:
-        1. РОВНО 3 поисковых запроса для Stepik (на русском языке):
-              - Запросы должны быть конкретными и отражать ключевые аспекты темы.
-              - Запросы не должны повторяться. Старайся использовать различные запросы для покрытия смежных потенциально полезных тем.
-        2. Плоский список тегов (40–70 штук) для классификации учебного материала.
-           Теги должны быть:
-           - Конкретными терминами и названиями: «TensorFlow», «PyTorch», «NumPy»,
-             «обратное распространение ошибки», «функция потерь», «градиентный спуск»
-           - БЕЗ категорий и группировок — просто список строк
-           - Отражать ВСЕ аспекты темы: инструменты, концепции, алгоритмы,
-             практические навыки, смежные области, уровень сложности
-        ЗАПРЕЩЕНО: добавлять теги типа «обучение», «курс», «урок», «введение» —
-        только конкретная техническая лексика.
-        Пример тегов для темы «Backend на Python»:
-        ["FastAPI", "SQLAlchemy", "PostgreSQL", "Docker", "REST API", "Pydantic",
-         "asyncio", "pytest", "JWT", "Redis", "Celery", "CI/CD", "Alembic",
-         "ORM", "миграции базы данных", "аутентификация", "CORS", "uvicorn"]
-
+        Ответы пользователя: {user_answers}
+        Создай 3 поисковых запроса для Stepik и плоский список тегов (40–70 штук).
+        Теги — конкретные термины: «TensorFlow», «градиентный спуск».
+        ЗАПРЕЩЕНО: «обучение», «курс», «урок».
         Верни ТОЛЬКО валидный JSON по схеме pipeline_setup.
         """).strip()
 
@@ -72,59 +61,195 @@ class PromptBank:
     def course_ranking(topic: str, user_context: str, courses: list[dict]) -> str:
         return dedent(f"""
         Ты — эксперт по оценке образовательного контента на платформе Stepik.
-        Тема: "{topic}"
-        Контекст пользователя:
-        {user_context}
-        Оцени каждый курс из списка по шкале 1–10.
-        КРИТЕРИИ (по убыванию важности):
-        1. Соответствие теме и уровню пользователя — главный критерий.
-        2. Актуальность технологического стека.
-        3. Число слушателей (learners_count) — вторичный сигнал качества.
-        4. Объём материала (sections_count) — больше не всегда лучше.
-        Курсы для оценки:
-        {json.dumps(courses, ensure_ascii=False, indent=2)}
-        ПРАВИЛА:
-        - Оцени КАЖДЫЙ курс, не пропускай.
-        - Обоснование — 1 предложение, строго по существу.
-        - Нерелевантный курс ставь ≤ 3, даже если популярный.
-        - Верни ТОЛЬКО валидный JSON по схеме course_ranking.
-        Пример оценки курса:
-        Тема: "Машинное обучение"
-        Название курса: "Машинное обучение от Яндекса"
-        Оценка: 10
-        Обоснование: "Отличный курс с фокусом на практические навыки и современные библиотеки,
-        идеально подходит для запроса пользователя."
-        Название курса: "Введение в программирование на Python"
-        Оценка: 2
-        Обоснование: "Курс слишком общий, не покрывает специфические технологии и задачи"
-        Название курса: "Глубокое обучение на PyTorch"
-        Оценка: 8
-        Обоснование: "Хороший курс с актуальным стеком, но может быть сложноват для начинающего пользователя, который не указал опыт с PyTorch."
-        Название курса: "Введение в программирование (C++)"
-        Оценка: 1
-        Обоснование: "Курс полностью не соответствует теме"
+        Тема: "{topic}". Контекст пользователя: {user_context}
+        Оцени каждый курс по шкале 1–10 (главный критерий — соответствие теме).
+        Нерелевантный курс ставь ≤ 3. Оцени КАЖДЫЙ курс.
+        Курсы: {json.dumps(courses, ensure_ascii=False, indent=2)}
+        Верни ТОЛЬКО валидный JSON по схеме course_ranking.
+        """).strip()
+
+    @staticmethod
+    def course_structure_thinking(
+        topic: str,
+        clarifying_questions: list[str],
+        user_answers: str,
+    ) -> str:
+        q_block = "\n".join(
+            f"  {i+1}. {q}" for i, q in enumerate(clarifying_questions)
+        ) if clarifying_questions else "  (не задавались)"
+
+        return dedent(f"""
+        Ты — опытный методист. Спроектируй детальную структуру учебного курса.
+
+        ТЕМА: «{topic}»
+        ВОПРОСЫ ПОЛЬЗОВАТЕЛЮ:
+        {q_block}
+        ОТВЕТЫ: {user_answers}
+
+        Создай 5–8 логических модулей (от основ к продвинутым темам).
+        Для каждого модуля: id (0-based), title, description (3–5 предл.),
+        goals (2–4 цели), key_topics (8–12 конкретных термина).
+        Для курса: course_title, course_description, course_goals.
+
+        Рассуждай структурированно, но кратко — не более 1200 токенов на анализ.
+        Как только план готов — сразу переходи к JSON без повторений.
+        Верни ТОЛЬКО валидный JSON по схеме course_structure_detailed.
+        """).strip()
+
+    @staticmethod
+    def search_setup_from_structure(
+        topic: str,
+        course_structure: dict,
+        user_answers: str,
+    ) -> str:
+        modules_summary = "\n".join(
+            f"  Модуль {m['id']}: «{m['title']}» — {', '.join(m.get('key_topics', [])[:6])}"
+            for m in course_structure.get("modules", [])
+        ) or "  (нет данных)"
+
+        return dedent(f"""
+        ТЕМА: «{topic}»
+        СТРУКТУРА КУРСА:
+        {modules_summary}
+        ОТВЕТЫ ПОЛЬЗОВАТЕЛЯ: {user_answers}
+
+        Сгенерируй ровно 5 поисковых запросов для Stepik (поиск по курсам, не по урокам)
+        и плоский список тегов (40–70) для кластеризации уроков в Stage 2.
+        Верни ТОЛЬКО валидный JSON по схеме pipeline_setup.
+        """).strip()
+
+    @staticmethod
+    def lesson_distribution(
+        modules: list[dict],
+        lessons: list[dict],
+        course_title: str = "",
+    ) -> str:
+        mod_lines = "\n\n".join(
+            f"МОДУЛЬ {m['id']}: «{m['title']}»\n"
+            f"  Описание: {m.get('description', '')[:180]}\n"
+            f"  Темы: {', '.join(m.get('key_topics', [])[:8])}"
+            for m in modules
+        )
+        lesson_lines = "\n".join(
+            f"  [{l.get('lesson_id', 0)}] [{l.get('section_title', '')}] {l.get('title', '')}"
+            for l in lessons
+        )
+        return dedent(f"""
+        Распредели уроки курса «{course_title}» по модулям программы.
+
+        МОДУЛИ:
+        {mod_lines}
+
+        УРОКИ ([lesson_id] [Раздел] Название):
+        {lesson_lines}
+
+        Каждый урок → один module_id или в unassigned.
+        Верни ТОЛЬКО валидный JSON по схеме lesson_distribution.
+        Обработай ВСЕ {len(lessons)} уроков.
+        """).strip()
+
+    @staticmethod
+    def coverage_evaluation(
+        course_structure: dict,
+        lessons_by_module: dict,
+        round_num: int = 1,
+        previous_assessment: str = "",
+    ) -> str:
+        course_goals_text = "\n".join(
+            f"  - {g}" for g in course_structure.get("course_goals", [])
+        ) or "  (не указаны)"
+
+        module_blocks = []
+        for m in course_structure.get("modules", []):
+            mid = m["id"]
+            lesson_titles = lessons_by_module.get(mid, [])
+            n = len(lesson_titles)
+            shown = "\n".join(f"      • {t}" for t in lesson_titles[:25])
+            if n > 25:
+                shown += f"\n      ... и ещё {n - 25}"
+            if not shown:
+                shown = "      ⚠ уроки не найдены"
+            module_blocks.append(
+                f"МОДУЛЬ {mid}: «{m.get('title', '')}» ({n} уроков)\n"
+                f"  Темы: {', '.join(m.get('key_topics', []))}\n"
+                f"  Уроки:\n{shown}"
+            )
+
+        prev_block = (
+            f"ПРЕДЫДУЩАЯ ОЦЕНКА (раунд {round_num-1}):\n{previous_assessment}\n\n"
+            if previous_assessment and round_num > 1 else ""
+        )
+        total = sum(len(v) for v in lessons_by_module.values())
+
+        return dedent(f"""
+        Оцени полноту покрытия курса (раунд {round_num}/2).
+        Курс: «{course_structure.get("course_title", "")}»
+        Цели: {course_goals_text}
+        Всего уроков: {total}
+
+        {prev_block}
+        {chr(10).join(module_blocks)}
+
+        Определи coverage_score (0–1), status каждого модуля (good/partial/poor),
+        overall_missing_topics и additional_queries (3–7 запросов для Stepik по курсам,
+        на русском, фокус на poor/partial модулях).
+        Рассуждай кратко и по существу — не более 800 токенов на анализ.
+        Как только картина ясна — сразу переходи к JSON.
+        Верни ТОЛЬКО валидный JSON по схеме coverage_evaluation.
         """).strip()
 
     # ══════════════════════════════════════════════════════════════════════
-    #  STAGE 2 — кластеризация, генерация чанков, курс
+    #  STAGE 2 — ОБНОВЛЁННЫЕ ПРОМПТЫ
     # ══════════════════════════════════════════════════════════════════════
 
     @staticmethod
-    def cluster_merge_decision(lesson_titles: list[str]) -> str:
-        numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(lesson_titles))
-        return dedent(f"""
-        Перед тобой уроки одного тематического кластера:
+    def cluster_merge_decision(
+        lesson_titles: list[str],
+        module_info: dict | None = None,
+        course_title: str = "",
+    ) -> str:
+        """
+        Решение об объединении уроков внутри кластера.
 
+        Теперь LLM видит контекст модуля: его цели и ключевые темы.
+        Это позволяет принимать решения о слиянии осознанно —
+        понимая, что модуль должен в итоге охватить.
+        """
+        numbered = "\n".join(f"  {i}. {t}" for i, t in enumerate(lesson_titles))
+
+        if module_info:
+            goals_str  = "; ".join(module_info.get("goals", [])[:3])
+            topics_str = ", ".join(module_info.get("key_topics", [])[:10])
+            context_block = dedent(f"""
+            КОНТЕКСТ:
+            Курс: «{course_title}»
+            Модуль: «{module_info.get("title", "")}»
+            Описание: {module_info.get("description", "")[:220]}
+            Цели модуля: {goals_str}
+            Ключевые темы: {topics_str}
+            """).strip()
+        else:
+            context_block = ""
+
+        return dedent(f"""
+        {context_block}
+
+        УРОКИ ДЛЯ ГРУППИРОВКИ (все из одного подкластера модуля):
         {numbered}
 
-        Определи, какие уроки стоит объединить в один блок знаний.
-        Правила:
-        - Уроки с практически одинаковой темой (например, «Введение в циклы»,
-          «Циклы for», «Циклы while») → ОБЪЕДИНЯЙ в одну группу.
-        - Уроки с явно разными аспектами → оставляй в отдельных группах.
-        - Предпочтительно объединять, а не дробить.
-        - Каждый индекс (0..N-1) должен быть ровно в одной группе.
+        ЗАДАЧА:
+        Определи, какие уроки объединить в один конспект.
 
+        КРИТЕРИИ ОБЪЕДИНЕНИЯ (в порядке приоритета):
+        1. Урок-теория + его практика/упражнения → ОБЪЕДИНЯЙ
+        2. Уроки, раскрывающие одну концепцию с разных сторон → ОБЪЕДИНЯЙ
+        3. Последовательные уроки одной мини-темы → ОБЪЕДИНЯЙ
+        4. Уроки разных аспектов модуля (разные концепции) → РАЗДЕЛЯЙ
+
+        ВАЖНО: учитывай цели модуля при группировке — каждая группа должна
+        формировать законченный смысловой блок в рамках модуля.
+
+        Каждый индекс (0..{len(lesson_titles)-1}) должен быть ровно в одной группе.
         Верни ТОЛЬКО валидный JSON по схеме cluster_merge_decision.
         """).strip()
 
@@ -133,32 +258,132 @@ class PromptBank:
         titles: list[str],
         known_tags: list[str],
         combined_text: str,
+        # ── Delta-контекст ──────────────────────────────────────────────
+        module_info: dict | None = None,
+        course_title: str = "",
+        previously_covered_in_module: list[str] | None = None,
+        cross_module_context: list[dict] | None = None,
     ) -> str:
-        tags_hint = ", ".join(known_tags[:60]) if known_tags else "(список тегов пуст)"
+        """
+        Генерация чанка знаний с delta-контекстом.
+
+        Args:
+            module_info:                    Описание и цели текущего модуля.
+            course_title:                   Название курса.
+            previously_covered_in_module:   Концепции, уже объяснённые в этом модуле
+                                            (из learned_concepts предыдущих чанков).
+            cross_module_context:           Контекст предыдущих модулей.
+                                            Формат: [{"title": "...", "concepts": [...]}]
+        """
+        tags_hint = ", ".join(known_tags[:60]) or "(пусто)"
+
+        # ── Блок контекста модуля ────────────────────────────────────
+        if module_info:
+            goals_str = "\n".join(f"    • {g}" for g in module_info.get("goals", []))
+            module_block = dedent(f"""
+            ═══ КОНТЕКСТ КУРСА ═══
+            Курс: «{course_title}»
+            Текущий модуль: «{module_info.get("title", "")}»
+            Описание модуля: {module_info.get("description", "")[:300]}
+            Цели модуля:
+            {goals_str}
+            ═════════════════════
+            """).strip()
+        else:
+            module_block = ""
+
+        # ── Блок межмодульного контекста ─────────────────────────────
+        if cross_module_context:
+            prev_mod_lines = []
+            # Показываем последние 3 модуля подробно, остальные — только названия
+            recent = cross_module_context[-3:]
+            older  = cross_module_context[:-3]
+            if older:
+                older_titles = ", ".join(f"«{m['title']}»" for m in older)
+                prev_mod_lines.append(f"  [Ранее пройдено: {older_titles}]")
+            for mod in recent:
+                concepts = mod.get("concepts", [])[:12]
+                c_str = "; ".join(concepts) if concepts else "—"
+                prev_mod_lines.append(
+                    f"  [{mod['title']}]\n    Освоено: {c_str}"
+                )
+            cross_block = (
+                "УЖЕ ИЗУЧЕНО В ПРЕДЫДУЩИХ МОДУЛЯХ (не объяснять заново, "
+                "можно ссылаться):\n" + "\n".join(prev_mod_lines)
+            )
+        else:
+            cross_block = ""
+
+        # ── Блок внутримодульного контекста ──────────────────────────
+        if previously_covered_in_module:
+            covered_str = "\n".join(
+                f"  • {c}" for c in previously_covered_in_module[:20]
+            )
+            module_covered_block = (
+                "УЖЕ ОБЪЯСНЕНО В ЭТОМ МОДУЛЕ (НЕ ПОВТОРЯТЬ — "
+                "читатель это знает):\n" + covered_str
+            )
+        else:
+            module_covered_block = ""
+
+        # ── Инструкция по merged_text ─────────────────────────────────
+        if previously_covered_in_module or cross_module_context:
+            text_instruction = dedent("""
+            ТРЕБОВАНИЯ К merged_text:
+            • НЕ повторяй концепции из «уже объяснено» — переходи сразу к новому
+            • Если нужно ссылаться на ранее изученное: «как мы уже рассмотрели...»
+              или «опираясь на знание X...» — одной фразой, без развёртывания
+            • Фокус ТОЛЬКО на том, что читатель узнаёт впервые
+            • Сохраняй определения, формулы, примеры кода, конкретные свойства
+            • Структурируй для лёгкого извлечения фактов LLM
+            • Убери воду, приветствия, повторяющийся материал между уроками
+            """).strip()
+        else:
+            text_instruction = dedent("""
+            ТРЕБОВАНИЯ К merged_text:
+            • Сохраняй определения, формулы, примеры кода, конкретные свойства
+            • Структурируй для лёгкого извлечения фактов LLM
+            • Убери воду, приветствия, повторяющийся материал между уроками
+            """).strip()
+
         return dedent(f"""
-        Создай структурированный блок знаний из следующих учебных уроков.
+        Создай структурированный блок знаний из учебных уроков.
 
-        Названия уроков: {", ".join(titles)}
+        {module_block}
 
-        Известные теги проекта (используй прежде всего их):
+        {cross_block}
+
+        {module_covered_block}
+
+        УРОКИ ДЛЯ КОНСПЕКТИРОВАНИЯ: {", ".join(titles)}
+
+        Известные теги проекта (использовать в первую очередь):
         {tags_hint}
 
         Текст уроков:
         {combined_text}
 
-        ТРЕБОВАНИЯ:
-        1. final_title — краткое итоговое название (≤ 10 слов).
-        2. summary — 3-5 предложений: ключевые понятия и их взаимосвязи.
-           Пример: «Рассматривается взаимосвязь функции потерь и оптимизатора.
-           Разобраны SGD, Adam и RMSProp. Показано влияние learning rate на сходимость.»
-        3. tags — 5-15 конкретных тегов. Приоритет: теги из списка выше.
-           Добавляй новые теги ТОЛЬКО если они конкретные термины, которых нет в списке.
-           НЕ добавляй общие слова типа «обучение», «урок», «введение».
-        4. merged_text — глубокий структурированный конспект:
-           - Удали «воду» и приветствия.
-           - Сохрани определения, формулы, код, списки свойств.
-           - Объедини дублирующийся материал.
-           - Структурируй так, чтобы LLM могла легко извлекать факты.
+        СТРУКТУРА ОТВЕТА:
+
+        1. final_title — краткое название блока (≤ 10 слов)
+
+        2. summary — 3–5 предложений:
+           • О чём этот блок и почему он важен в контексте модуля
+           • Какую проблему решает или какой навык формирует
+
+        3. tags — 5–15 тегов. Приоритет — из известных тегов проекта.
+           Новые теги только если это конкретный термин, отсутствующий в списке.
+
+        4. merged_text — конспект (см. требования выше)
+
+        5. learned_concepts — ОБЯЗАТЕЛЬНО — 5–10 конкретных понятий/навыков,
+           которые читатель освоит ВПЕРВЫЕ из этого блока.
+           Эти данные будут переданы следующему блоку как «уже изучено».
+           Формат: конкретные термины («метод Adam», «learning rate scheduling»),
+           НЕ абстрактные категории («оптимизация нейросетей»).
+
+        6. assumed_knowledge — что читатель должен знать ДО этого блока
+           (может быть пустым для первого блока модуля)
 
         Верни ТОЛЬКО валидный JSON по схеме chunk_generation.
         """).strip()
@@ -170,55 +395,41 @@ class PromptBank:
         tag_sample: list[str],
     ) -> str:
         return dedent(f"""
-        Создай детальную структуру образовательного курса по теме: "{topic}"
+        Создай структуру образовательного курса по теме: "{topic}"
 
-        Доступные блоки знаний (чанки):
+        Доступные блоки знаний:
         {json.dumps(chunk_summaries, ensure_ascii=False, indent=2)}
 
-        Проектные теги (используй при тегировании шагов):
-        {", ".join(tag_sample)}
+        Теги проекта: {", ".join(tag_sample)}
 
-        ТРЕБОВАНИЯ К СТРУКТУРЕ:
-        - 3–6 логических модулей, от простого к сложному.
-        - В каждом модуле 3–7 шагов.
-        - Каждый шаг должен иметь:
-          * title — название шага
-          * query_texts — РОВНО 3 поисковых запроса для семантического поиска
-            по базе знаний (конкретные формулировки, не общие)
-          * tags — 3-8 тегов из проектного списка
-
-        Примеры хороших query_texts для шага «Градиентный спуск»:
-        - «как работает градиентный спуск в нейросетях»
-        - «скорость обучения learning rate влияние на сходимость»
-        - «SGD Adam оптимизатор сравнение»
-
+        ТРЕБОВАНИЯ: 3–6 модулей, в каждом 3–7 шагов.
+        Каждый шаг: title, query_texts (РОВНО 3), tags (3-8).
         Верни ТОЛЬКО валидный JSON по схеме course_structure.
         """).strip()
 
     @staticmethod
     def rag_answer(question: str, context: str) -> str:
         return dedent(f"""
-        Ты — образовательный ассистент. Ответь на вопрос, используя ТОЛЬКО
-        предоставленный контекст из базы знаний.
+        Ты — образовательный ассистент. Ответь на вопрос, используя ТОЛЬКО контекст.
 
         Контекст:
         {context}
 
         Вопрос: {question}
 
-        ПРАВИЛА:
-        - Если ответ есть в контексте — отвечай точно и кратко.
-        - Если контекст не содержит нужной информации — честно скажи об этом.
-        - НЕ придумывай факты, которых нет в контексте.
+        Если ответ есть в контексте — отвечай точно. Не придумывай.
         """).strip()
 
 
-# Сопоставление задач → схемы (для удобного использования)
 TASK_TO_SCHEMA = {
-    "clarifying_questions":   "clarifying_questions",
-    "pipeline_setup":         "pipeline_setup",
-    "course_ranking":         "course_ranking",
-    "cluster_merge_decision": "cluster_merge_decision",
-    "chunk_generation":       "chunk_generation",
-    "course_structure":       "course_structure",
+    "clarifying_questions":        "clarifying_questions",
+    "pipeline_setup":              "pipeline_setup",
+    "course_ranking":              "course_ranking",
+    "course_structure_thinking":   "course_structure_detailed",
+    "search_setup_from_structure": "pipeline_setup",
+    "lesson_distribution":         "lesson_distribution",
+    "coverage_evaluation":         "coverage_evaluation",
+    "cluster_merge_decision":      "cluster_merge_decision",
+    "chunk_generation":            "chunk_generation",
+    "course_structure":            "course_structure",
 }

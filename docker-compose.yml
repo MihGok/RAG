@@ -89,16 +89,7 @@ services:
       - postgres
       - mongodb
 
-    command:
-      - "/opt/venv/bin/uvicorn"
-      - "main:app"
-      - "--host"
-      - "0.0.0.0"
-      - "--port"
-      - "8000"
-      - "--workers"
-      - "1"
-      - "--reload"
+    command: ["/bin/bash", "/srv/endpoint/entrypoint.sh"]
 
 # ════════════════════════════════════════════
 #  PERSISTENT VOLUMES
