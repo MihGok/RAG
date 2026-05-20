@@ -62,7 +62,12 @@ services:
       N_CTX_DEFAULT: ${N_CTX_DEFAULT}
       # БД
       POSTGRES_DSN: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
-      MONGO_URI: "mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongodb:27017"
+      # BUG FIX: добавлен ?authSource=admin — корневой пользователь MongoDB
+      # создаётся через MONGO_INITDB_ROOT_USERNAME и живёт в базе admin.
+      # Без authSource=admin pymongo пытается аутентифицироваться против
+      # базы rag_db, которой ещё нет → Authentication failed.
+      MONGO_URI: "mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongodb:27017/?authSource=admin"
+      MONGO_DB: "rag_db"
       QDRANT_HOST: qdrant
       QDRANT_PORT: "6333"
       # Gemini

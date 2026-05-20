@@ -3,15 +3,10 @@ KnowledgeBaseCreator/merger.py
 ───────────────────────────────
 Объединение уроков в чанки.
 
-Изменения:
-  decide_merges_in_cluster() — теперь получает module_info и course_title,
-    передаёт их в промпт для осознанного решения о слиянии.
-
-  generate_chunk() — принимает delta-контекст:
-    module_info                    — цели и темы текущего модуля
-    previously_covered_in_module   — из learned_concepts предыдущих чанков
-    cross_module_context           — сводка по пройденным модулям
-  Добавляет module_id и learned_concepts в результат.
+BUG FIX: MAIN_MODEL был "Qwen2.5-3B-Instruct-Q4_K_L.gguf" — такая модель есть
+         на диске, но она не зарегистрирована в ML-backend как chat-модель
+         совместимая с /no_think. Переключено на RuadaptQwen3-4B-Hybrid-Q8_0.gguf,
+         которая используется во всём остальном пайплайне Stage 2.
 """
 
 from __future__ import annotations
@@ -28,9 +23,11 @@ import requests
 from config import AppConfig
 from LLMprompts import PromptBank
 
-logger    = logging.getLogger(__name__)
-TASK_URL  = f"{AppConfig.ML_SERVER_URL.rstrip('/')}/task"
-MAIN_MODEL = "Qwen2.5-3B-Instruct-Q4_K_L.gguf"
+logger   = logging.getLogger(__name__)
+TASK_URL = f"{AppConfig.ML_SERVER_URL.rstrip('/')}/task"
+
+# BUG FIX: приведено в соответствие с loading_workflow.py и pipeline.py
+MAIN_MODEL    = "RuadaptQwen3-4B-Hybrid-Q8_0.gguf"
 MAX_TEXT_CHARS = 6000
 
 
@@ -82,15 +79,6 @@ def decide_merges_in_cluster(
     module_info: Optional[Dict] = None,
     course_title: str = "",
 ) -> List[List[int]]:
-    """
-    Определяет, какие уроки внутри кластера объединить в один чанк.
-
-    Args:
-        cluster_lessons: список (filename, lesson_name, data_dict)
-        module_info:     описание текущего модуля из Stage 1 силлабуса
-                         (title, description, goals, key_topics)
-        course_title:    название курса для контекста
-    """
     n = len(cluster_lessons)
     if n == 1:
         return [[0]]
@@ -162,31 +150,14 @@ def generate_chunk(
     lessons_to_merge: List[Tuple[str, str, Dict]],
     known_tags: List[str],
     session_dir: str,
-    # ── Delta-контекст ───────────────────────────────────────────────────
     module_info: Optional[Dict] = None,
     course_title: str = "",
     previously_covered_in_module: Optional[List[str]] = None,
     cross_module_context: Optional[List[Dict]] = None,
 ) -> Dict[str, Any]:
-    """
-    Генерирует чанк знаний.
-
-    Args:
-        lessons_to_merge:             уроки для объединения
-        known_tags:                   текущий список тегов проекта
-        session_dir:                  папка сессии (для сохранения обновлённых тегов)
-        module_info:                  описание текущего модуля (title, goals, key_topics)
-        course_title:                 название курса
-        previously_covered_in_module: learned_concepts предыдущих чанков модуля
-        cross_module_context:         [{title, concepts}] для предыдущих модулей
-
-    Returns:
-        dict с полями по схеме chunk_generation + module_id
-    """
     titles   = [l[1] for l in lessons_to_merge]
     combined = _build_combined_text(lessons_to_merge)
 
-    # Для чанков с контекстом нужно больше токенов и контекстного окна
     has_context = bool(previously_covered_in_module or cross_module_context)
     n_ctx       = 6144 if has_context else 4096
     max_tokens  = 2560 if has_context else 2048
@@ -219,11 +190,9 @@ def generate_chunk(
             "assumed_knowledge": [],
         }
 
-    # Обеспечиваем наличие delta-полей
     result.setdefault("learned_concepts", [])
     result.setdefault("assumed_knowledge", [])
 
-    # Расширяем список тегов проекта
     known_lower = {t.lower().strip() for t in known_tags}
     new_tags: List[str] = []
     for tag in result.get("tags", []):
@@ -236,7 +205,6 @@ def generate_chunk(
         _save_tags(known_tags, session_dir)
         logger.info("Теги расширены: %s", new_tags)
 
-    # Метаданные источников
     result["source_lesson_ids"] = [d.get("lesson_id") for _, _, d in lessons_to_merge]
     result["source_course_ids"] = list({d.get("course_id") for _, _, d in lessons_to_merge})
     result["source_filenames"]  = [l[0] for l in lessons_to_merge]

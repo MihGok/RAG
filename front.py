@@ -3,15 +3,14 @@ front.py
 ─────────
 RAG CourseBuilder — Gradio UI в стиле Gemini.
 
-Вкладки (скрыты за логином):
-  Sidebar : список чатов + режим (Course / RAG)
-  Main    : чат с AI, скачивание DOCX
-
-Режимы:
-  📚 Создать курс  — многошаговый диалог → Stage1 + Stage2 → DOCX
-  🔍 Быстрый ответ — RAG-поиск по существующей базе знаний
-
-Запуск: python front.py
+BUG FIXES:
+  1. EMBED_MODEL: "f16" → "BF16" (имя файла на диске)
+  2. _pg(): init_db() вызывался при каждом обращении к БД.
+     Добавлен модульный флаг _db_initialized.
+  3. _ensure_chat(): проверка `if not chat_id` заменена на
+     `if chat_id is None` — иначе chat_id=0 (ошибка соединения)
+     тоже приводил к попытке создать новый чат.
+  4. _save_pair(): добавлен update_chat_title при первом сообщении.
 """
 
 from __future__ import annotations
@@ -26,23 +25,35 @@ import gradio as gr
 
 import loading_workflow as wf
 
-EMBED_MODEL  = "Qwen3-Embedding-0.6B-f16.gguf"
-MAIN_MODEL   = wf.MAIN_MODEL
-from dotenv import load_dotenv
-import os
+# BUG FIX: было "Qwen3-Embedding-0.6B-f16.gguf"
+EMBED_MODEL = "Qwen3-Embedding-0.6B-BF16.gguf"
+MAIN_MODEL  = wf.MAIN_MODEL
 
+from dotenv import load_dotenv
 load_dotenv()
-# ─── DB (lazy) ───────────────────────────────────────────────────────────────
+
+# ─── DB (lazy, с флагом инициализации) ───────────────────────────────────────
+
+_db_initialized = False
+
 
 def _pg():
+    """
+    BUG FIX: init_db() вызывался при каждом вызове _pg() (т.е. при
+    каждой операции с БД), что запускало CREATE TABLE IF NOT EXISTS
+    и занимало соединение из пула. Теперь DDL выполняется один раз.
+    """
+    global _db_initialized
     try:
         import db.postgres_service as pg
-        pg.init_db()
+        if not _db_initialized:
+            pg.init_db()
+            _db_initialized = True
         return pg
     except Exception as e:
-        print(f"!!! ОШИБКА ПОДКЛЮЧЕНИЯ К БД: {e}") # Выведет конкретную ошибку
+        print(f"!!! ОШИБКА ПОДКЛЮЧЕНИЯ К БД: {e}")
         import traceback
-        traceback.print_exc() 
+        traceback.print_exc()
         return None
 
 
@@ -60,8 +71,8 @@ def do_login(email: str, password: str) -> tuple:
     pg = _pg()
     if not pg:
         return (
-            gr.update(visible=True),   # login_block
-            gr.update(visible=False),  # app_block
+            gr.update(visible=True),
+            gr.update(visible=False),
             "База данных недоступна.",
             {},
         )
@@ -113,8 +124,8 @@ def do_register(email: str, password: str, full_name: str) -> tuple:
 
 def do_logout(user_state: dict) -> tuple:
     return (
-        gr.update(visible=True),   # login_block
-        gr.update(visible=False),  # app_block
+        gr.update(visible=True),
+        gr.update(visible=False),
         "",
         {},
         [],
@@ -129,7 +140,7 @@ def do_logout(user_state: dict) -> tuple:
 
 def _empty_conv() -> dict:
     return {
-        "stage":           "idle",    # idle | questions | generating | done
+        "stage":           "idle",
         "topic":           "",
         "questions":       [],
         "user_answers":    "",
@@ -163,12 +174,10 @@ def refresh_chats(user_state: dict) -> gr.update:
 
 
 def select_chat(choice: str, user_state: dict) -> tuple:
-    """Загружает сообщения выбранного чата."""
     pg = _pg()
     if not pg or not choice:
         return [], _empty_conv(), gr.update(visible=False), None
 
-    # Извлекаем chat_id из строки вида "Название #123"
     try:
         chat_id = int(choice.rsplit("#", 1)[-1].strip())
     except (ValueError, IndexError):
@@ -182,7 +191,6 @@ def select_chat(choice: str, user_state: dict) -> tuple:
             for m in msgs
         ]
 
-        # Пытаемся восстановить meta из чата
         chats = pg.list_chats(user_state.get("user_id", 0))
         meta  = {}
         for c in chats:
@@ -197,55 +205,71 @@ def select_chat(choice: str, user_state: dict) -> tuple:
         conv["collection_name"] = meta.get("collection_name", "")
         conv["docx_path"]       = meta.get("docx_path", "")
 
-        # Показываем кнопку скачивания если есть docx
         docx = conv["docx_path"]
         if docx and os.path.exists(docx):
             return history, conv, gr.update(visible=True), docx
         return history, conv, gr.update(visible=False), None
 
     except Exception as e:
+        print(f"[select_chat] {e}")
         return [], _empty_conv(), gr.update(visible=False), None
 
 
 def new_chat(user_state: dict) -> tuple:
     return (
-        [],              # chatbot
-        _empty_conv(),   # conv_state
-        gr.update(visible=False),  # download_col
-        None,            # course_file
-        None,            # chat_selector value
+        [],
+        _empty_conv(),
+        gr.update(visible=False),
+        None,
+        None,
     )
 
 
 # ─── DB HELPERS ──────────────────────────────────────────────────────────────
 
-def _ensure_chat(conv: dict, user_state: dict, title: str) -> int:
+def _ensure_chat(conv: dict, user_state: dict, title: str) -> Optional[int]:
+    """
+    BUG FIX: было `if not chat_id` — это ловило и 0 (falsy),
+    который мог оказаться в conv при сбое соединения.
+    Теперь явная проверка на None.
+    """
     pg = _pg()
     if not pg:
-        return 0
+        return None
     chat_id = conv.get("chat_id")
-    if not chat_id:
-        row = pg.create_chat(user_state.get("user_id", 0), title=title[:60])
-        chat_id = row["chat_id"]
-        conv["chat_id"] = chat_id
+    if chat_id is None:
+        try:
+            row = pg.create_chat(user_state.get("user_id", 0), title=title[:60])
+            chat_id = row["chat_id"]
+            conv["chat_id"] = chat_id
+        except Exception as e:
+            print(f"[DB] create_chat: {e}")
+            return None
     return chat_id
 
 
 def _save_pair(conv: dict, user_state: dict, user_msg: str, ai_msg: str):
+    """
+    Сохраняет пару сообщений (user + assistant) в PostgreSQL.
+    add_message теперь корректно возвращает строку INSERT RETURNING *
+    (был баг: fetchone() вызывался после UPDATE → TypeError).
+    """
     pg = _pg()
     if not pg:
         return
     try:
         chat_id = _ensure_chat(conv, user_state, user_msg)
+        if chat_id is None:
+            return
         pg.add_message(chat_id, True,  user_msg)
         pg.add_message(chat_id, False, ai_msg)
     except Exception as e:
-        print(f"[DB] {e}")
+        print(f"[DB] _save_pair: {e}")
 
 
 def _persist_meta(conv: dict):
     pg = _pg()
-    if not pg or not conv.get("chat_id"):
+    if not pg or conv.get("chat_id") is None:
         return
     try:
         pg.update_chat_meta(conv["chat_id"], {
@@ -253,8 +277,8 @@ def _persist_meta(conv: dict):
             "collection_name": conv.get("collection_name", ""),
             "docx_path":       conv.get("docx_path", ""),
         })
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[DB] _persist_meta: {e}")
 
 
 # ─── RAG QUICK ANSWER ────────────────────────────────────────────────────────
@@ -319,29 +343,27 @@ def _run_pipeline_bg(
     done_event: threading.Event,
     transcribe: bool,
 ):
-
     try:
         def _log(msg: str):
             log_buffer.append(msg)
- 
-        # ── Stage 1 ──────────────────────────────────────────────────────
+
         session_dir = wf.run_stage1(
             topic=topic,
             user_answers=user_answers,
-            clarifying_questions=clarifying_questions,   # ← НОВОЕ
+            clarifying_questions=clarifying_questions,
             max_courses=5,
             limit_per_query=30,
             transcribe=transcribe,
             log_fn=_log,
         )
- 
+
         if not session_dir:
             result_holder["error"] = "Stage 1 не вернул папку сессии"
             return
- 
-        # ── Stage 2 ──────────────────────────────────────────────────────
+
         from KnowledgeBaseCreator.pipeline import run_stage2
- 
+
+        # chat_id может быть None если БД недоступна — это нормально
         chat_id = conv.get("chat_id")
         result  = run_stage2(
             session_dir=session_dir,
@@ -351,12 +373,13 @@ def _run_pipeline_bg(
         )
         result["session_dir"] = session_dir
         result_holder["result"] = result
- 
+
     except Exception as e:
         result_holder["error"] = str(e)
         log_buffer.append(f"❌ Критическая ошибка: {e}")
     finally:
         done_event.set()
+
 
 # ─── MESSAGE HANDLER ─────────────────────────────────────────────────────────
 
@@ -368,16 +391,11 @@ def handle_message(
     mode: str,
     transcribe: bool,
 ) -> Generator:
-    """
-    Центральный обработчик сообщений пользователя.
-    Yields (history, conv, download_col_update, file_value, chat_selector_update).
-    """
     message = (message or "").strip()
     if not message:
         yield history, conv, gr.update(visible=False), None, gr.update()
         return
 
-    # Добавляем сообщение пользователя
     history = list(history) + [{"role": "user", "content": message}]
     yield history, conv, gr.update(visible=False), None, gr.update()
 
@@ -392,7 +410,6 @@ def handle_message(
     # ── Режим создания курса ─────────────────────────────────────────────
     stage = conv.get("stage", "idle")
 
-    # Stage: idle → задаём уточняющие вопросы
     if stage == "idle":
         conv = {**conv, "topic": message, "stage": "questions"}
         questions = wf.generate_clarifying_questions(message)
@@ -406,30 +423,35 @@ def handle_message(
             f"*Можно ответить на все вопросы в одном сообщении.*"
         )
         history = history + [{"role": "assistant", "content": ai_msg}]
+        # Создаём чат и сохраняем первую пару сообщений
         _save_pair(conv, user_state, message, ai_msg)
-        _ensure_chat(conv, user_state, message)
+        # Обновляем заголовок чата темой
+        pg = _pg()
+        if pg and conv.get("chat_id") is not None:
+            try:
+                pg.update_chat_title(conv["chat_id"], message[:60])
+            except Exception as e:
+                print(f"[DB] update_chat_title: {e}")
         yield history, conv, gr.update(visible=False), None, gr.update()
         return
 
     if stage == "questions":
         conv = {**conv, "user_answers": message, "stage": "generating"}
         topic = conv.get("topic", message)
- 
-        # Начальное сообщение
+
         history = history + [{"role": "assistant", "content": "🚀 Запускаю создание курса..."}]
         yield history, conv, gr.update(visible=False), None, gr.update()
- 
-        # Запускаем pipeline в фоне
-        log_buffer:    list  = []
-        result_holder: dict  = {}
+
+        log_buffer:    list = []
+        result_holder: dict = {}
         done_event = threading.Event()
- 
+
         t = threading.Thread(
             target=_run_pipeline_bg,
             args=(
                 topic,
                 message,
-                conv.get("questions", []),   # ← НОВОЕ: передаём уточняющие вопросы
+                conv.get("questions", []),
                 conv,
                 user_state,
                 log_buffer,
@@ -441,7 +463,6 @@ def handle_message(
         )
         t.start()
 
-        # Стримим прогресс
         last_len = 0
         while not done_event.is_set():
             time.sleep(1.5)
@@ -492,7 +513,6 @@ def handle_message(
         history[-1]["content"] = ai_msg
         _save_pair(conv, user_state, message, ai_msg)
 
-        # Обновляем список чатов
         new_choices = _chat_choices(user_state)
 
         if docx_path and os.path.exists(docx_path):
@@ -511,7 +531,6 @@ def handle_message(
             )
         return
 
-    # Stage: done → RAG по созданной базе
     if stage == "done":
         answer  = _rag_answer(message, conv)
         history = history + [{"role": "assistant", "content": answer}]
@@ -690,7 +709,6 @@ footer { display: none !important; }
 
 with gr.Blocks(title="CourseRAG") as demo:
 
-    # ── Persistent state ──────────────────────────────────────────────────
     user_state = gr.State({})
     conv_state = gr.State(_empty_conv())
 
@@ -719,7 +737,6 @@ with gr.Blocks(title="CourseRAG") as demo:
     # ══════════════════════════════════════════════════════════════════════
     with gr.Row(visible=False, elem_id="app-shell") as app_block:
 
-        # ── Sidebar ──────────────────────────────────────────────────────
         with gr.Column(elem_id="sidebar", scale=0, min_width=260):
             gr.HTML('<div id="sidebar-logo">📚 CourseRAG</div>')
 
@@ -751,10 +768,9 @@ with gr.Blocks(title="CourseRAG") as demo:
 
             gr.HTML('<div class="sidebar-divider"></div>')
 
-            user_badge   = gr.HTML('<div id="user-badge">—</div>')
-            logout_btn   = gr.Button("Выйти", elem_id="logout-btn")
+            user_badge = gr.HTML('<div id="user-badge">—</div>')
+            logout_btn = gr.Button("Выйти", elem_id="logout-btn")
 
-        # ── Main content ─────────────────────────────────────────────────
         with gr.Column(elem_id="main-col", scale=1):
             chat_header = gr.HTML(
                 '<div id="chat-header">Начните новый чат →</div>'
@@ -764,7 +780,6 @@ with gr.Blocks(title="CourseRAG") as demo:
                 value=[],
                 height=None,
                 elem_id="main-chatbot",
-                
                 placeholder=(
                     "**Добро пожаловать в CourseRAG!**\n\n"
                     "Введите тему — и система создаст для вас полноценный учебный курс:\n"
@@ -774,10 +789,9 @@ with gr.Blocks(title="CourseRAG") as demo:
                     "В режиме «🔍 Быстрый ответ» задавайте вопросы по уже созданной базе."
                 ),
                 show_label=False,
-                buttons= ['copy'    ]
+                buttons=["copy"],
             )
 
-            # Download section (скрыт по умолчанию)
             with gr.Column(visible=False, elem_id="download-col") as download_col:
                 gr.HTML("<h4>📥 Курс готов к скачиванию</h4>")
                 course_file = gr.File(
@@ -785,7 +799,6 @@ with gr.Blocks(title="CourseRAG") as demo:
                     interactive=False,
                 )
 
-            # Input row
             with gr.Row(elem_id="input-row"):
                 msg_input = gr.Textbox(
                     show_label=False,
@@ -804,14 +817,12 @@ with gr.Blocks(title="CourseRAG") as demo:
     _auth_outputs = [login_block, app_block, login_error, user_state]
 
     def _post_login(user_state_val):
-        """После логина: обновляем список чатов и бейдж."""
         choices = _chat_choices(user_state_val)
         email   = user_state_val.get("email", "")
         name    = user_state_val.get("full_name", "") or email
         badge   = f'<div id="user-badge">👤 {name}</div>'
         return gr.update(choices=choices), badge
 
-    # Login
     login_btn.click(
         do_login,
         inputs=[login_email, login_password],
@@ -831,7 +842,6 @@ with gr.Blocks(title="CourseRAG") as demo:
         outputs=[chat_selector, user_badge],
     )
 
-    # Register
     reg_btn.click(
         do_register,
         inputs=[reg_email, reg_password, reg_name],
@@ -842,7 +852,6 @@ with gr.Blocks(title="CourseRAG") as demo:
         outputs=[chat_selector, user_badge],
     )
 
-    # Logout
     logout_btn.click(
         do_logout,
         inputs=[user_state],
@@ -852,7 +861,6 @@ with gr.Blocks(title="CourseRAG") as demo:
         ],
     )
 
-    # New chat
     new_chat_btn.click(
         new_chat,
         inputs=[user_state],
@@ -862,10 +870,9 @@ with gr.Blocks(title="CourseRAG") as demo:
         outputs=[chat_header],
     )
 
-    # Select existing chat
     def _on_select_chat(choice, user_state_val):
         hist, conv, dl_upd, fval = select_chat(choice, user_state_val)
-        topic = conv.get("topic", "") or "Чат"
+        topic  = conv.get("topic", "") or "Чат"
         header = f'<div id="chat-header">{topic}</div>'
         return hist, conv, dl_upd, fval, header
 
@@ -875,15 +882,9 @@ with gr.Blocks(title="CourseRAG") as demo:
         outputs=[chatbot, conv_state, download_col, course_file, chat_header],
     )
 
-    # Send message
     _send_outputs = [
         chatbot, conv_state, download_col, course_file, chat_selector
     ]
-
-    def _send(msg, hist, conv, user_st, mode, transcribe):
-        # update header when topic is set for the first time
-        for state in handle_message(msg, hist, conv, user_st, mode, transcribe):
-            yield state + (gr.update(),)  # last = cleared input (handled separately)
 
     send_btn.click(
         handle_message,

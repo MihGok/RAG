@@ -3,11 +3,8 @@ db/mongo_service.py
 ───────────────────
 MongoDB для хранения структур курсов.
 
-Коллекции:
-  generated_courses — Stage 2 структура (модули → шаги с query_texts/tags)
-  syllabi           — Stage 1 силлабус (модули → цели, key_topics)
-                      Хранит детальный план от 9B-модели с thinking.
-  sessions          — мета-информация о сессиях
+BUG FIX: добавлен ?authSource=admin в URI по умолчанию для Docker-окружения
+         с аутентификацией через MONGO_INITDB_ROOT_USERNAME/PASSWORD.
 """
 
 from __future__ import annotations
@@ -22,6 +19,9 @@ from pymongo.collection import Collection
 
 logger = logging.getLogger(__name__)
 
+# BUG FIX: при наличии логина/пароля в URI MongoDB требует authSource=admin
+# (корневой пользователь создаётся в admin, но по умолчанию аутентификация
+# происходит против базы из URI-пути, которой не существует)
 _MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 _DB_NAME   = os.getenv("MONGO_DB", "rag_db")
 
@@ -31,8 +31,15 @@ _client: Optional[MongoClient] = None
 def get_client() -> MongoClient:
     global _client
     if _client is None:
-        _client = MongoClient(_MONGO_URI, serverSelectionTimeoutMS=5000)
-        logger.info("MongoDB: подключение установлено")
+        # authSource=admin нужен когда пользователь создан через
+        # MONGO_INITDB_ROOT_USERNAME (он живёт в базе admin)
+        connect_uri = _MONGO_URI
+        if "@" in _MONGO_URI and "authSource" not in _MONGO_URI:
+            sep = "?" if "?" not in _MONGO_URI else "&"
+            connect_uri = f"{_MONGO_URI}{sep}authSource=admin"
+
+        _client = MongoClient(connect_uri, serverSelectionTimeoutMS=5000)
+        logger.info("MongoDB: подключение установлено (%s)", connect_uri)
     return _client
 
 
@@ -47,15 +54,6 @@ def save_syllabus(
     syllabus: Dict[str, Any],
     topic: str,
 ) -> str:
-    """
-    Сохраняет детальную структуру курса из Stage 1 (9B + thinking).
-
-    Коллекция: syllabi
-    Upsert по session_id — перезапись при повторном запуске Stage 1.
-
-    Returns:
-        session_id (используется как идентификатор в downstream)
-    """
     doc = {
         "session_id":        session_id,
         "topic":             topic,
@@ -85,7 +83,6 @@ def save_syllabus(
 
 
 def get_syllabus(session_id: str) -> Optional[Dict[str, Any]]:
-    """Загрузить силлабус Stage 1 по session_id."""
     doc = _col("syllabi").find_one({"session_id": session_id})
     if doc:
         doc["_id"] = str(doc["_id"])
@@ -101,27 +98,16 @@ def save_course_structure(
     chunks_count: int = 0,
     syllabus_session_id: Optional[str] = None,
 ) -> str:
-    """
-    Сохраняет Stage 2 структуру курса (T-lite: модули → шаги).
-
-    Args:
-        syllabus_session_id: session_id силлабуса Stage 1 для связи.
-                             Обычно совпадает с session_id.
-
-    Returns:
-        Строковый MongoDB _id документа.
-    """
     doc = {
         "session_id":          session_id,
         "topic":               topic,
         "course_title":        course_structure.get("course_title", ""),
         "modules":             course_structure.get("modules", []),
         "chunks_count":        chunks_count,
-        # Ссылка на Stage 1 силлабус для трассировки
         "syllabus_session_id": syllabus_session_id or session_id,
     }
 
-    result  = _col("generated_courses").insert_one(doc)
+    result   = _col("generated_courses").insert_one(doc)
     mongo_id = str(result.inserted_id)
     logger.info("MongoDB[generated_courses]: курс сохранён, id=%s", mongo_id)
     return mongo_id

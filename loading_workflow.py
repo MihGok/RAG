@@ -1,41 +1,4 @@
-"""
-loading_workflow.py
-────────────────────
-Stage 1 v2: поиск, фильтрация и скачивание курсов со Stepik.
 
-Новый пайплайн (7 шагов + 2 раунда оценки):
-
-  Шаг 1  | generate_clarifying_questions(topic)
-             └→ вызывается ДО run_stage1, из front.py / CLI
-
-  Шаг 2  | 9B + thinking → детальная структура курса (модули, цели, темы)
-             └→ выгрузка 9B из VRAM
-
-  Шаг 3  | 3B → поисковые запросы (5 шт.) + карта тегов (40-70) для Stage 2
-             └→ выгрузка 3B из VRAM
-
-  Шаг 4  | Stepik search → для каждого найденного курса:
-             4a. get_course_outline → список уроков (title, lesson_id)
-             4b. 4B → распределение уроков по модулям (1 запрос / курс)
-             └→ выгрузка 4B из VRAM
-
-  Шаг 5  | Скачивание + транскрибация назначенных уроков
-             (lesson JSON дополняется полем module_id)
-
-  Шаг 6  | 9B + thinking → оценка покрытия раунд 1
-             └→ выгрузка 9B + доп. поиск + раздача + скачивание
-
-  Шаг 7  | 9B + thinking → оценка покрытия раунд 2
-             └→ выгрузка 9B + доп. поиск + раздача + скачивание
-
-Модели:
-  THINKING_MODEL     = Qwen3.5-9B-Q5_K_M.gguf          (шаги 2, 6, 7)
-  MAIN_MODEL         = Qwen2.5-3B-Instruct-Q4_K_L.gguf  (шаги 1, 3)
-  DISTRIBUTION_MODEL = RuadaptQwen3-4B-Hybrid-Q8_0.gguf (шаги 4b, 6 доп., 7 доп.)
-
-front.py совместимость: сигнатура run_stage1 расширена параметром
-  clarifying_questions: list[str] | None = None
-"""
 
 from __future__ import annotations
 
@@ -57,14 +20,9 @@ from LLMprompts import PromptBank
 #  Константы моделей
 # ════════════════════════════════════════════════════════════════════════════
 
-# 9B с thinking: генерация структуры + оценка покрытия
+# Используем одну 4B-модель для всех шагов
 THINKING_MODEL     = "Qwen3.5-9B-Q5_K_M.gguf"
-
-# 3B без thinking: уточняющие вопросы + поисковые запросы + теги
 MAIN_MODEL         = "RuadaptQwen3-4B-Hybrid-Q8_0.gguf"
-
-# 4B hybrid: распределение уроков по модулям (per-course, no thinking)
-# Имя файла квантования RuadaptQwen3-4B-Hybrid-GGUF
 DISTRIBUTION_MODEL = "RuadaptQwen3-4B-Hybrid-Q8_0.gguf"
 
 # Параметры запросов к ML-бэкенду
@@ -75,8 +33,6 @@ UNLOAD_URL              = f"{_BASE_URL}/models"
 
 DEFAULT_MAX_COURSES     = 5
 DEFAULT_LIMIT_PER_QUERY = 30
-
-# Максимум уроков одного курса, подаваемых на distribution (контекст 4B)
 MAX_LESSONS_PER_DIST    = 80
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -91,14 +47,14 @@ def _call_llm(
     model: str = MAIN_MODEL,
     enable_thinking: bool = False,
     n_ctx: int = 4096,
-    timeout: int = 900,
+    timeout: int = 300,
 ) -> dict:
     """
     POST /task к ML-бэкенду. Возвращает распарсенный dict или {}.
 
-    timeout:  секунды ожидания ответа.
-              Малые модели (3-4B): 300–900 с.
-              9B с thinking:      1800 с (30 минут) — генерация + thinking.
+    BUG FIX: дефолтный timeout снижен 900 → 300 (реально для 4B-модели).
+    enable_thinking=False по умолчанию — 4B Hybrid не нуждается в CoT,
+    и с True генерирует бесконечный <think> блок.
     """
     payload = {
         "task_type":       "llm",
@@ -115,7 +71,6 @@ def _call_llm(
         resp = requests.post(TASK_URL, json=payload, timeout=timeout)
         resp.raise_for_status()
         result = resp.json().get("result", {})
-        # Стандартный fallback: JSON-объект внутри текстового ответа
         if isinstance(result, dict) and "response" in result and len(result) == 1:
             m = re.search(r"\{.*\}", result["response"], re.DOTALL)
             if m:
@@ -134,9 +89,17 @@ def _call_llm(
 
 def _unload_model(model_name: str, log_fn=None) -> bool:
     """
-    DELETE /models/{name} — выгружает модель из VRAM на ML-бэкенде.
-    Вызывается между этапами пайплайна.
+    DELETE /models/{name} — выгружает модель из VRAM.
+
+    BUG FIX: если все три константы указывают на одну модель,
+    выгрузка между шагами бессмысленна — следующий шаг тут же
+    перезагрузит её (~30с оверхед). Пропускаем в таком случае.
     """
+    all_models = {THINKING_MODEL, MAIN_MODEL, DISTRIBUTION_MODEL}
+    if len(all_models) == 1:
+        # Все шаги используют одну модель — не выгружаем между ними
+        return True
+
     def _log(msg):
         print(msg)
         if log_fn:
@@ -145,9 +108,9 @@ def _unload_model(model_name: str, log_fn=None) -> bool:
     try:
         resp = requests.delete(
             f"{UNLOAD_URL}/{model_name}",
-            timeout=30,
+            timeout=60,
         )
-        data = resp.json()
+        data  = resp.json()
         count = data.get("count", 0)
         if count > 0:
             _log(f"[VRAM] Выгружена: {model_name} ({count} вариантов)")
@@ -160,7 +123,7 @@ def _unload_model(model_name: str, log_fn=None) -> bool:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  Шаг 1 — уточняющие вопросы (3B, без thinking)
+#  Шаг 1 — уточняющие вопросы
 # ════════════════════════════════════════════════════════════════════════════
 
 def generate_clarifying_questions(topic: str) -> List[str]:
@@ -173,6 +136,7 @@ def generate_clarifying_questions(topic: str) -> List[str]:
         model=MAIN_MODEL,
         enable_thinking=False,
         n_ctx=2048,
+        timeout=120,
     )
     questions = result.get("questions", [])
     if not questions:
@@ -186,7 +150,7 @@ def generate_clarifying_questions(topic: str) -> List[str]:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  Шаг 2 — детальная структура курса (9B + thinking)
+#  Шаг 2 — структура курса
 # ════════════════════════════════════════════════════════════════════════════
 
 def generate_course_structure(
@@ -196,24 +160,30 @@ def generate_course_structure(
     log_fn=None,
 ) -> Dict[str, Any]:
     """
-    9B с thinking → детальная структура курса.
-    После вызова: выгрузить THINKING_MODEL.
+    BUG FIX: enable_thinking=True → False для 4B-модели.
+
+    С enable_thinking=True модель генерирует бесконечный <think>…</think>
+    и никогда не переходит к JSON (таймаут 1800с).
+    С enable_thinking=False подключается GBNF-грамматика → JSON за ~30-90с.
+
+    max_tokens снижен 4096 → 2048 (структуры из 5-8 модулей умещаются).
+    timeout снижен 1800 → 300 (4B должна ответить за 5 минут максимум).
     """
     def _log(msg):
         print(msg)
         if log_fn:
             log_fn(msg)
 
-    _log(f"[Структура] Генерирую с thinking ({THINKING_MODEL})...")
+    _log(f"[Структура] Генерирую ({THINKING_MODEL})...")
     prompt = PromptBank.course_structure_thinking(topic, clarifying_questions, user_answers)
     result = _call_llm(
         prompt,
         "course_structure_detailed",
-        temperature=0.5,
-        max_tokens=4096,  
+        temperature=0.4,
+        max_tokens=2048,
         model=THINKING_MODEL,
         enable_thinking=True,
-        n_ctx=4096,
+        n_ctx=1800,
         timeout=1800,
     )
 
@@ -227,7 +197,6 @@ def generate_course_structure(
 
 
 def _build_fallback_structure(topic: str) -> Dict[str, Any]:
-    """Минимальная структура если 9B упала или вернула пустой ответ."""
     return {
         "course_title":       f"Курс: {topic}",
         "course_description": f"Учебный курс по теме «{topic}».",
@@ -256,7 +225,7 @@ def _build_fallback_structure(topic: str) -> Dict[str, Any]:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  Шаг 3 — поисковые запросы + теги (3B, без thinking)
+#  Шаг 3 — поисковые запросы + теги
 # ════════════════════════════════════════════════════════════════════════════
 
 def generate_search_setup(
@@ -265,10 +234,6 @@ def generate_search_setup(
     user_answers: str,
     log_fn=None,
 ) -> Dict[str, Any]:
-    """
-    3B без thinking → 5 запросов для Stepik + плоский список тегов.
-    После вызова: выгрузить MAIN_MODEL.
-    """
     def _log(msg):
         print(msg)
         if log_fn:
@@ -280,10 +245,11 @@ def generate_search_setup(
         prompt,
         "pipeline_setup",
         temperature=0.3,
-        max_tokens=2048,
+        max_tokens=1024,
         model=MAIN_MODEL,
         enable_thinking=False,
         n_ctx=4096,
+        timeout=180,
     )
 
     if not result.get("search_queries"):
@@ -302,16 +268,15 @@ def generate_search_setup(
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  Шаги 4a-4b — Stepik поиск + распределение уроков (4B, без thinking)
+#  Шаги 4a-4b — Stepik поиск + распределение уроков
 # ════════════════════════════════════════════════════════════════════════════
 
 def search_stepik(
-    loader: StepikCourseLoader,
+    loader: "StepikCourseLoader",
     queries: List[str],
     limit_per_query: int = DEFAULT_LIMIT_PER_QUERY,
     log_fn=None,
 ) -> List[Dict[str, Any]]:
-    """Поиск курсов по всем запросам, дедупликация."""
     def _log(msg):
         print(msg)
         if log_fn:
@@ -337,33 +302,22 @@ def search_stepik(
 
 
 def distribute_lessons_for_course(
-    loader: StepikCourseLoader,
+    loader: "StepikCourseLoader",
     course: Dict[str, Any],
     modules: List[Dict[str, Any]],
     log_fn=None,
 ) -> Dict[int, int]:
-    """
-    Для одного курса:
-    1. Получает список уроков через get_course_outline
-    2. Одним запросом к 4B модели распределяет уроки по модулям
-
-    Returns:
-        {lesson_id: module_id}  — только для assigned уроков
-    """
     def _log(msg):
         print(msg)
         if log_fn:
             log_fn(msg)
 
     course_title = course.get("title", f"course_{course.get('id')}")
-
-    # Получаем оглавление курса (только метаданные, без скачивания)
     outline = loader.get_course_outline(course)
     if not outline:
         _log(f"  [Dist] {course_title}: нет уроков в оглавлении")
         return {}
 
-    # Ограничиваем размер для контекста 4B
     lessons_for_prompt = outline[:MAX_LESSONS_PER_DIST]
     if len(outline) > MAX_LESSONS_PER_DIST:
         _log(
@@ -375,14 +329,14 @@ def distribute_lessons_for_course(
     result = _call_llm(
         prompt,
         "lesson_distribution",
-        temperature=0.1,       # детерминированность важна для корректной разметки
+        temperature=0.1,
         max_tokens=2048,
         model=DISTRIBUTION_MODEL,
         enable_thinking=False,
         n_ctx=6144,
+        timeout=180,
     )
 
-    # Парсим ответ
     assignment_map: Dict[int, int] = {}
     for item in result.get("assignments", []):
         lid = item.get("lesson_id")
@@ -400,15 +354,11 @@ def distribute_lessons_for_course(
 
 
 def distribute_lessons_for_courses(
-    loader: StepikCourseLoader,
+    loader: "StepikCourseLoader",
     courses: List[Dict[str, Any]],
     course_structure: Dict[str, Any],
     log_fn=None,
 ) -> Dict[int, int]:
-    """
-    Распределяет уроки всех курсов.
-    Returns: глобальная карта {lesson_id: module_id}
-    """
     def _log(msg):
         print(msg)
         if log_fn:
@@ -419,12 +369,11 @@ def distribute_lessons_for_courses(
 
     _log(f"[Dist] Распределение уроков для {len(courses)} курсов ({DISTRIBUTION_MODEL})...")
     for i, course in enumerate(courses, 1):
-        cid = course.get("id")
-        title = course.get("title", str(cid))
+        title = course.get("title", str(course.get("id")))
         _log(f"  [{i}/{len(courses)}] {title}")
         partial = distribute_lessons_for_course(loader, course, modules, log_fn)
         global_map.update(partial)
-        time.sleep(0.3)  # throttle
+        time.sleep(0.3)
 
     _log(f"[Dist] Итого назначено уроков: {len(global_map)}")
     return global_map
@@ -435,7 +384,7 @@ def distribute_lessons_for_courses(
 # ════════════════════════════════════════════════════════════════════════════
 
 def download_assigned_courses(
-    loader: StepikCourseLoader,
+    loader: "StepikCourseLoader",
     courses: List[Dict[str, Any]],
     session_dir: str,
     lesson_module_map: Dict[int, int],
@@ -443,11 +392,6 @@ def download_assigned_courses(
     max_courses: int = DEFAULT_MAX_COURSES,
     log_fn=None,
 ) -> int:
-    """
-    Скачивает уроки из назначенных курсов, проставляет module_id в JSON.
-    Скачиваются только курсы из списка (по max_courses).
-    Returns: количество скачанных файлов (новых).
-    """
     def _log(msg):
         print(msg)
         if log_fn:
@@ -463,7 +407,6 @@ def download_assigned_courses(
         title = course.get("title", str(cid))
         _log(f"  [{i}/{min(max_courses, len(courses))}] Скачиваю: {title}")
 
-        # Проверяем/записываемся на курс
         if not course.get("is_enrolled"):
             if not loader.check_enrollment(cid):
                 loader.enroll_in_course(cid)
@@ -474,7 +417,6 @@ def download_assigned_courses(
         except Exception as e:
             _log(f"    ❌ Ошибка скачивания: {e}")
 
-    # Простановка module_id во все новые файлы
     files_after = set(_json_files(raw_data_dir))
     new_files   = files_after - files_before
     _tag_files_with_modules(raw_data_dir, new_files, lesson_module_map, log_fn)
@@ -484,7 +426,6 @@ def download_assigned_courses(
 
 
 def _json_files(directory: str) -> List[str]:
-    """Список имён .json файлов в директории."""
     if not os.path.isdir(directory):
         return []
     return [f for f in os.listdir(directory) if f.endswith(".json")]
@@ -496,10 +437,6 @@ def _tag_files_with_modules(
     lesson_module_map: Dict[int, int],
     log_fn=None,
 ) -> None:
-    """
-    Читает каждый новый JSON-файл, добавляет поле module_id по lesson_id.
-    Уроки без назначения получают module_id = -1 (неназначенные).
-    """
     for fname in filenames:
         path = os.path.join(raw_data_dir, fname)
         try:
@@ -510,7 +447,6 @@ def _tag_files_with_modules(
             if lesson_id is not None:
                 module_id = lesson_module_map.get(int(lesson_id), -1)
                 data["module_id"] = module_id
-
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
@@ -519,14 +455,10 @@ def _tag_files_with_modules(
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  Шаги 6-7 — оценка покрытия (9B + thinking)
+#  Шаги 6-7 — оценка покрытия
 # ════════════════════════════════════════════════════════════════════════════
 
 def build_lessons_by_module(raw_data_dir: str) -> Dict[int, List[str]]:
-    """
-    Читает все JSON из raw_data_dir и группирует названия уроков по module_id.
-    module_id = -1 → неназначенные.
-    """
     by_module: Dict[int, List[str]] = {}
     if not os.path.isdir(raw_data_dir):
         return by_module
@@ -555,20 +487,17 @@ def evaluate_coverage(
     log_fn=None,
 ) -> Dict[str, Any]:
     """
-    9B + thinking → оценка покрытия + дополнительные запросы.
-    После вызова: выгрузить THINKING_MODEL.
-
-    Returns:
-        dict по схеме coverage_evaluation
+    BUG FIX: enable_thinking=True → False (та же причина, что в generate_course_structure).
+    n_ctx снижен 12288 → 6144, max_tokens 3500 → 2048, timeout 1800 → 300.
     """
     def _log(msg):
         print(msg)
         if log_fn:
             log_fn(msg)
 
-    raw_data_dir    = os.path.join(session_dir, "raw_data")
-    lessons_by_mod  = build_lessons_by_module(raw_data_dir)
-    total           = sum(len(v) for v in lessons_by_mod.values())
+    raw_data_dir   = os.path.join(session_dir, "raw_data")
+    lessons_by_mod = build_lessons_by_module(raw_data_dir)
+    total          = sum(len(v) for v in lessons_by_mod.values())
     _log(f"[Coverage] Раунд {round_num}: {total} уроков, {THINKING_MODEL}...")
 
     prompt = PromptBank.coverage_evaluation(
@@ -581,11 +510,11 @@ def evaluate_coverage(
         prompt,
         "coverage_evaluation",
         temperature=0.3,
-        max_tokens=3500,  # thinking + JSON оценки
+        max_tokens=2048,        # BUG FIX: было 3500
         model=THINKING_MODEL,
-        enable_thinking=True,
-        n_ctx=12288,
-        timeout=1800,  # 30 мин
+        enable_thinking=False,  # BUG FIX: было True → бесконечный <think>
+        n_ctx=6144,             # BUG FIX: было 12288
+        timeout=300,            # BUG FIX: было 1800
     )
 
     score       = result.get("coverage_score", 0.0)
@@ -611,14 +540,13 @@ def create_session(
     clarifying_questions: List[str] = None,
 ) -> Tuple[str, str]:
     os.makedirs(SESSIONS_DIR, exist_ok=True)
-    ts         = datetime.now().strftime("%Y%m%d_%H%M%S")
-    session_id = f"{ts}_{str(uuid.uuid4())[:8]}"
+    ts          = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_id  = f"{ts}_{str(uuid.uuid4())[:8]}"
     session_dir = os.path.join(SESSIONS_DIR, session_id)
 
     os.makedirs(os.path.join(session_dir, "raw_data"), exist_ok=True)
     os.makedirs(os.path.join(session_dir, "final"), exist_ok=True)
 
-    # session_info.json
     with open(os.path.join(session_dir, "session_info.json"), "w", encoding="utf-8") as f:
         json.dump(
             {
@@ -631,11 +559,9 @@ def create_session(
             f, ensure_ascii=False, indent=2,
         )
 
-    # tags.json — плоский список для Stage 2
     with open(os.path.join(session_dir, "tags.json"), "w", encoding="utf-8") as f:
         json.dump(tags, f, ensure_ascii=False, indent=2)
 
-    # course_structure.json — детальная структура от 9B
     with open(os.path.join(session_dir, "course_structure.json"), "w", encoding="utf-8") as f:
         json.dump(course_structure, f, ensure_ascii=False, indent=2)
 
@@ -650,7 +576,6 @@ def _save_coverage_report(session_dir: str, round_num: int, report: Dict[str, An
 
 def _save_lesson_module_map(session_dir: str, mapping: Dict[int, int]) -> None:
     path = os.path.join(session_dir, "lesson_module_map.json")
-    # Если файл уже есть — мержим (новые данные не перетирают старые)
     existing: Dict[str, int] = {}
     if os.path.exists(path):
         try:
@@ -672,7 +597,6 @@ def load_tags(session_dir: str) -> List[str]:
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    # backward compat: tag_map.json (словарь или список)
     old = os.path.join(session_dir, "tag_map.json")
     if os.path.exists(old):
         with open(old, "r", encoding="utf-8") as f:
@@ -700,22 +624,6 @@ def run_stage1(
     transcribe: bool = True,
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> Optional[str]:
-    """
-    Полный Stage 1: от ответов пользователя до скачанных уроков с module_id.
-
-    Args:
-        topic:                Тема курса.
-        user_answers:         Ответы пользователя на уточняющие вопросы.
-        clarifying_questions: Сами вопросы (для контекста 9B-промпта).
-                              Если None — prompt будет без них.
-        max_courses:          Сколько курсов скачивать за один раунд.
-        limit_per_query:      Лимит ID курсов на один поисковый запрос.
-        transcribe:           Транскрибировать видео-шаги.
-        log_fn:               Callback для стриминга логов в front.py.
-
-    Returns:
-        Путь к папке сессии или None при критической ошибке.
-    """
     def _log(msg: str):
         print(msg)
         if log_fn:
@@ -727,17 +635,17 @@ def run_stage1(
     _log(f"  STAGE 1  |  Тема: «{topic}»")
     _log(f"{'='*60}")
 
-    # ── Шаг 2: структура курса (9B + thinking) ────────────────────────
-    _log("\n[1/7] Генерирую структуру курса (9B + thinking)...")
+    # ── Шаг 2: структура курса ────────────────────────────────────────
+    _log("\n[1/7] Генерирую структуру курса...")
     course_structure = generate_course_structure(topic, qs, user_answers, log_fn)
-    _unload_model(THINKING_MODEL, log_fn)
+    _unload_model(THINKING_MODEL, log_fn)  # no-op если все модели одинаковые
 
-    # ── Шаг 3: запросы + теги (3B) ────────────────────────────────────
-    _log("\n[2/7] Генерирую поисковые запросы и теги (3B)...")
+    # ── Шаг 3: запросы + теги ─────────────────────────────────────────
+    _log("\n[2/7] Генерирую поисковые запросы и теги...")
     setup   = generate_search_setup(topic, course_structure, user_answers, log_fn)
     queries = setup.get("search_queries", [topic])
     tags    = setup.get("tags", [topic])
-    _unload_model(MAIN_MODEL, log_fn)
+    _unload_model(MAIN_MODEL, log_fn)  # no-op если все модели одинаковые
 
     _log(f"  Запросов: {len(queries)} | Тегов: {len(tags)}")
 
@@ -747,7 +655,7 @@ def run_stage1(
     )
     _log(f"\n📁 Сессия: {session_id}")
 
-    # ── Авторизация Stepik ───────────────────────────────────────────
+    # ── Авторизация Stepik ────────────────────────────────────────────
     _log("\n[3/7] Авторизация Stepik...")
     try:
         loader = StepikCourseLoader()
@@ -762,15 +670,15 @@ def run_stage1(
     if not courses:
         _log("⚠ Курсы не найдены. Продолжаю с пустой базой.")
 
-    # ── Шаг 4b: распределение уроков (4B) ────────────────────────────
-    _log("\n[5/7] Распределение уроков по модулям (4B)...")
+    # ── Шаг 4b: распределение уроков ─────────────────────────────────
+    _log("\n[5/7] Распределение уроков по модулям...")
     lesson_module_map: Dict[int, int] = {}
     if courses:
         lesson_module_map = distribute_lessons_for_courses(
             loader, courses, course_structure, log_fn
         )
         _save_lesson_module_map(session_dir, lesson_module_map)
-    _unload_model(DISTRIBUTION_MODEL, log_fn)
+    _unload_model(DISTRIBUTION_MODEL, log_fn)  # no-op если все модели одинаковые
 
     # ── Шаг 5: скачивание ────────────────────────────────────────────
     _log(f"\n[6/7] Скачиваю уроки (топ-{max_courses} курсов)...")
@@ -787,12 +695,12 @@ def run_stage1(
     previous_assessment = ""
 
     for round_num in (1, 2):
-        _log(f"\n[7/7] Оценка покрытия — раунд {round_num}/2 (9B + thinking)...")
+        _log(f"\n[7/7] Оценка покрытия — раунд {round_num}/2...")
         eval_result = evaluate_coverage(
             course_structure, session_dir, round_num, previous_assessment, log_fn
         )
         _save_coverage_report(session_dir, round_num, eval_result)
-        _unload_model(THINKING_MODEL, log_fn)
+        _unload_model(THINKING_MODEL, log_fn)  # no-op если все модели одинаковые
 
         previous_assessment = eval_result.get("assessment", "")
         add_queries         = eval_result.get("additional_queries", [])
@@ -807,14 +715,12 @@ def run_stage1(
             f"{' | '.join(add_queries[:3])}{'...' if len(add_queries) > 3 else ''}"
         )
 
-        # Доп. поиск
         _log(f"  Ищу дополнительные курсы...")
         extra_courses = search_stepik(loader, add_queries, limit_per_query, log_fn)
         _log(f"  Найдено доп. курсов: {len(extra_courses)}")
 
         if extra_courses:
-            # Доп. распределение (4B)
-            _log(f"  Распределяю уроки доп. курсов (4B)...")
+            _log(f"  Распределяю уроки доп. курсов...")
             extra_map = distribute_lessons_for_courses(
                 loader, extra_courses, course_structure, log_fn
             )
@@ -822,7 +728,6 @@ def run_stage1(
             _save_lesson_module_map(session_dir, lesson_module_map)
             _unload_model(DISTRIBUTION_MODEL, log_fn)
 
-            # Доп. скачивание
             _log(f"  Скачиваю доп. уроки...")
             download_assigned_courses(
                 loader, extra_courses, session_dir,

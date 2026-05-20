@@ -2,6 +2,9 @@
 stage2/embedder.py
 ──────────────────
 Загружает JSON-файлы уроков и векторизует их названия через /task endpoint.
+
+BUG FIX: имя модели было "Qwen3-Embedding-0.6B-f16.gguf" (неверно) →
+         исправлено на "Qwen3-Embedding-0.6B-BF16.gguf".
 """
 
 from __future__ import annotations
@@ -18,8 +21,9 @@ from config import AppConfig
 
 logger = logging.getLogger(__name__)
 
-EMBED_URL   = f"{AppConfig.ML_SERVER_URL.rstrip('/')}/task"
-DEFAULT_MODEL = "Qwen3-Embedding-0.6B-f16.gguf"
+EMBED_URL     = f"{AppConfig.ML_SERVER_URL.rstrip('/')}/task"
+# BUG FIX: было "Qwen3-Embedding-0.6B-f16.gguf" — файла с таким именем нет
+DEFAULT_MODEL = "Qwen3-Embedding-0.6B-BF16.gguf"
 
 
 # ─── I/O ─────────────────────────────────────────────────────────────────────
